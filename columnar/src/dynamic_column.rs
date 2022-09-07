@@ -242,6 +242,11 @@ impl DynamicColumnHandle {
         self.open_internal(column_bytes)
     }
 
+    pub async fn open_async(&self) -> io::Result<DynamicColumn> {
+        let column_bytes: OwnedBytes = self.file_slice.read_bytes_async().await?;
+        self.open_internal(column_bytes)
+    }
+
     #[doc(hidden)]
     pub fn file_slice(&self) -> &FileSlice {
         &self.file_slice
@@ -277,6 +282,24 @@ impl DynamicColumnHandle {
             | ColumnType::U64
             | ColumnType::F64
             | ColumnType::DateTime => {
+                let column =
+                    crate::column::open_column_u64::<u64>(column_bytes, self.format_version)?;
+                Ok(Some(column))
+            }
+        }
+    }
+
+    pub async fn open_u64_lenient_async(&self) -> io::Result<Option<Column<u64>>> {
+        let column_bytes = self.file_slice.read_bytes_async().await?;
+        match self.column_type {
+            ColumnType::Str | ColumnType::Bytes => {
+                let column: BytesColumn =
+                    crate::column::open_column_bytes(column_bytes, self.format_version)?;
+                Ok(Some(column.term_ord_column))
+            }
+            ColumnType::Bool => Ok(None),
+            ColumnType::IpAddr => Ok(None),
+            ColumnType::I64 | ColumnType::U64 | ColumnType::F64 | ColumnType::DateTime => {
                 let column =
                     crate::column::open_column_u64::<u64>(column_bytes, self.format_version)?;
                 Ok(Some(column))

@@ -204,14 +204,14 @@ impl DocSet for SegmentPostings {
         self.block_cursor.doc(self.cur)
     }
 
-    fn size_hint(&self) -> u32 {
-        self.len() as u32
+    fn size_hint(&self) -> u64 {
+        self.len()
     }
 }
 
 impl HasLen for SegmentPostings {
-    fn len(&self) -> usize {
-        self.block_cursor.doc_freq() as usize
+    fn len(&self) -> u64 {
+        self.block_cursor.doc_freq() as u64
     }
 }
 

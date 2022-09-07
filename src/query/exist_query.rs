@@ -1,5 +1,6 @@
 use core::fmt::Debug;
 
+use async_trait::async_trait;
 use columnar::{ColumnIndex, DynamicColumn};
 
 use super::{ConstScorer, EmptyScorer};
@@ -66,6 +67,7 @@ impl ExistsQuery {
     }
 }
 
+#[async_trait]
 impl Query for ExistsQuery {
     fn weight(&self, enable_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         let schema = enable_scoring.schema();
@@ -84,6 +86,14 @@ impl Query for ExistsQuery {
             field_type: field_type.value_type(),
             json_subpaths: self.json_subpaths,
         }))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.weight(enable_scoring)
     }
 }
 
@@ -169,7 +179,7 @@ impl DocSet for ExistsDocSet {
         self.seek(self.doc + 1)
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         0
     }
 

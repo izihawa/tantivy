@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
 
 use columnar::{
     ColumnType, ColumnarReader, MergeRowOrder, RowAddr, ShuffleMergeOrder, StackMergeOrder,
 };
-use common::ReadOnlyBitSet;
+use common::{ReadOnlyBitSet, TerminatingWrite};
 use itertools::Itertools;
 use measure_time::debug_time;
 
@@ -76,6 +78,7 @@ fn estimate_total_num_tokens(readers: &[SegmentReader], field: Field) -> crate::
     Ok(total_num_tokens)
 }
 
+#[derive(Clone)]
 pub struct IndexMerger {
     schema: Schema,
     pub(crate) readers: Vec<SegmentReader>,
@@ -555,6 +558,7 @@ impl IndexMerger {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use columnar::Column;
     use proptest::prop_oneof;
@@ -632,7 +636,7 @@ mod tests {
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.merge(&segment_ids).wait()?;
             index_writer.wait_merging_threads()?;
         }
@@ -1297,7 +1301,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_for_tests()?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             let index_doc = |index_writer: &mut IndexWriter, int_vals: &[u64]| {
                 let mut doc = TantivyDocument::default();
                 for &val in int_vals {
@@ -1436,7 +1440,7 @@ mod tests {
         // Merging the segments
         {
             let segment_ids = index.searchable_segment_ids()?;
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.merge(&segment_ids).wait()?;
             index_writer.wait_merging_threads()?;
         }
@@ -1480,7 +1484,7 @@ mod tests {
         // Make sure we'll attempt to merge every created segment
         let mut policy = crate::indexer::LogMergePolicy::default();
         policy.set_min_num_segments(2);
-        writer.set_merge_policy(Box::new(policy));
+        writer.set_merge_policy(Arc::new(policy));
 
         for i in 0..100 {
             let mut doc = TantivyDocument::new();

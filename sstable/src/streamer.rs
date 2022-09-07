@@ -11,9 +11,9 @@ use crate::{DeltaReader, SSTable, TermOrdinal};
 /// a range of terms that should be streamed.
 pub struct StreamerBuilder<'a, TSSTable, A = AlwaysMatch>
 where
-    A: Automaton,
-    A::State: Clone,
-    TSSTable: SSTable,
+    A: Send + Automaton,
+    A::State: Send + Clone,
+    TSSTable: Send + SSTable,
 {
     term_dict: &'a Dictionary<TSSTable>,
     automaton: A,
@@ -32,9 +32,9 @@ fn bound_as_byte_slice(bound: &Bound<Vec<u8>>) -> Bound<&[u8]> {
 
 impl<'a, TSSTable, A> StreamerBuilder<'a, TSSTable, A>
 where
-    A: Automaton,
-    A::State: Clone,
-    TSSTable: SSTable,
+    A: Send + Automaton,
+    A::State: Send + Clone,
+    TSSTable: Send + SSTable,
 {
     pub(crate) fn new(term_dict: &'a Dictionary<TSSTable>, automaton: A) -> Self {
         StreamerBuilder {
@@ -91,7 +91,7 @@ where
 
     async fn delta_reader_async(
         &self,
-        merge_holes_under_bytes: usize,
+        merge_holes_under_bytes: u64,
     ) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
         let key_range = (
             bound_as_byte_slice(&self.lower),
@@ -145,7 +145,7 @@ where
     /// blocks that are not consecutive, but also less than `merge_holes_under_bytes` bytes appart.
     pub async fn into_stream_async_merging_holes(
         self,
-        merge_holes_under_bytes: usize,
+        merge_holes_under_bytes: u64,
     ) -> io::Result<Streamer<'a, TSSTable, A>> {
         let delta_reader = self.delta_reader_async(merge_holes_under_bytes).await?;
         self.into_stream_given_delta_reader(delta_reader)
@@ -163,9 +163,9 @@ where
 /// Terms are guaranteed to be sorted.
 pub struct Streamer<'a, TSSTable, A = AlwaysMatch>
 where
-    A: Automaton,
-    A::State: Clone,
-    TSSTable: SSTable,
+    A: Send + Automaton,
+    A::State: Send + Clone,
+    TSSTable: Send + SSTable,
 {
     automaton: A,
     states: Vec<A::State>,
@@ -179,7 +179,8 @@ where
 }
 
 impl<TSSTable> Streamer<'_, TSSTable, AlwaysMatch>
-where TSSTable: SSTable
+where
+    TSSTable: SSTable,
 {
     pub fn empty() -> Self {
         Streamer {
@@ -197,9 +198,9 @@ where TSSTable: SSTable
 
 impl<TSSTable, A> Streamer<'_, TSSTable, A>
 where
-    A: Automaton,
-    A::State: Clone,
-    TSSTable: SSTable,
+    A: Send + Automaton,
+    A::State: Send + Clone,
+    TSSTable: Send + SSTable,
 {
     /// Advance position the stream on the next item.
     /// Before the first call to `.advance()`, the stream

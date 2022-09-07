@@ -220,7 +220,7 @@ pub struct SSTableIndexV3Empty {
 }
 
 impl SSTableIndexV3Empty {
-    pub fn load(index_start_pos: usize) -> SSTableIndexV3Empty {
+    pub fn load(index_start_pos: u64) -> SSTableIndexV3Empty {
         SSTableIndexV3Empty {
             block_addr: BlockAddr {
                 first_ordinal: 0,
@@ -260,7 +260,7 @@ impl SSTableIndexV3Empty {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct BlockAddr {
     pub first_ordinal: u64,
-    pub byte_range: Range<usize>,
+    pub byte_range: Range<u64>,
 }
 
 impl BlockAddr {
@@ -275,11 +275,11 @@ impl BlockAddr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockStartAddr {
     first_ordinal: u64,
-    byte_range_start: usize,
+    byte_range_start: u64,
 }
 
 impl BlockStartAddr {
-    fn to_block_addr(&self, byte_range_end: usize) -> BlockAddr {
+    fn to_block_addr(&self, byte_range_end: u64) -> BlockAddr {
         BlockAddr {
             first_ordinal: self.first_ordinal,
             byte_range: self.byte_range_start..byte_range_end,
@@ -308,7 +308,7 @@ impl BinarySerializable for BlockStartAddr {
         let first_ordinal = u64::deserialize(reader)?;
         Ok(BlockStartAddr {
             first_ordinal,
-            byte_range_start,
+            byte_range_start: byte_range_start as u64,
         })
     }
 
@@ -357,7 +357,7 @@ impl SSTableIndexBuilder {
         }
     }
 
-    pub fn add_block(&mut self, last_key: &[u8], byte_range: Range<usize>, first_ordinal: u64) {
+    pub fn add_block(&mut self, last_key: &[u8], byte_range: Range<u64>, first_ordinal: u64) {
         self.blocks.push(BlockMeta {
             last_key_or_greater: last_key.to_vec(),
             block_addr: BlockAddr {
@@ -423,9 +423,9 @@ impl BlockAddrBlockMetadata {
     fn deserialize_block_addr(&self, data: &[u8], inner_offset: usize) -> Option<BlockAddr> {
         if inner_offset == 0 {
             let range_end = self.ref_block_addr.byte_range_start
-                + extract_bits(data, 0, self.range_start_nbits) as usize
-                + self.range_start_slope as usize
-                - self.range_shift as usize;
+                + extract_bits(data, 0, self.range_start_nbits)
+                + self.range_start_slope as u64
+                - self.range_shift as u64;
             return Some(self.ref_block_addr.to_block_addr(range_end));
         }
         let inner_offset = inner_offset - 1;
@@ -443,17 +443,17 @@ impl BlockAddrBlockMetadata {
         }
 
         let range_start = self.ref_block_addr.byte_range_start
-            + extract_bits(data, range_start_addr, self.range_start_nbits) as usize
-            + self.range_start_slope as usize * (inner_offset + 1)
-            - self.range_shift as usize;
+            + extract_bits(data, range_start_addr, self.range_start_nbits)
+            + self.range_start_slope as u64 * (inner_offset + 1) as u64
+            - self.range_shift as u64;
         let first_ordinal = self.ref_block_addr.first_ordinal
             + extract_bits(data, ordinal_addr, self.first_ordinal_nbits)
             + self.first_ordinal_slope as u64 * (inner_offset + 1) as u64
             - self.ordinal_shift as u64;
         let range_end = self.ref_block_addr.byte_range_start
-            + extract_bits(data, range_end_addr, self.range_start_nbits) as usize
-            + self.range_start_slope as usize * (inner_offset + 2)
-            - self.range_shift as usize;
+            + extract_bits(data, range_end_addr, self.range_start_nbits)
+            + self.range_start_slope as u64 * (inner_offset + 2) as u64
+            - self.range_shift as u64;
 
         Some(BlockAddr {
             first_ordinal,

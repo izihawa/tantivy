@@ -1,6 +1,7 @@
 use std::io;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common::BitSet;
 use tantivy_fst::Automaton;
 
@@ -25,7 +26,7 @@ pub struct AutomatonWeight<A> {
 impl<A> AutomatonWeight<A>
 where
     A: Automaton + Send + Sync + 'static,
-    A::State: Clone,
+    A::State: Send + Clone,
 {
     /// Create a new AutomationWeight
     pub fn new<IntoArcA: Into<Arc<A>>>(field: Field, automaton: IntoArcA) -> AutomatonWeight<A> {
@@ -52,7 +53,10 @@ where
     fn automaton_stream<'a>(
         &'a self,
         term_dict: &'a TermDictionary,
-    ) -> io::Result<TermStreamer<'a, &'a A>> {
+    ) -> io::Result<TermStreamer<'a, &'a A>>
+    where
+        <A as Automaton>::State: std::marker::Send,
+    {
         let automaton: &A = &self.automaton;
         let mut term_stream_builder = term_dict.search(automaton);
 
@@ -77,12 +81,26 @@ where
         }
         Ok(term_infos)
     }
+
+    #[cfg(feature = "quickwit")]
+    async fn automaton_stream_async<'a>(
+        &'a self,
+        term_dict: &'a TermDictionary,
+    ) -> io::Result<TermStreamer<'a, &'a A>>
+    where
+        <A as Automaton>::State: std::marker::Send,
+    {
+        let automaton: &A = &self.automaton;
+        let term_stream_builder = term_dict.search(automaton);
+        term_stream_builder.into_stream_async().await
+    }
 }
 
+#[async_trait]
 impl<A> Weight for AutomatonWeight<A>
 where
     A: Automaton + Send + Sync + 'static,
-    A::State: Clone,
+    A::State: Send + Clone,
 {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let max_doc = reader.max_doc();
@@ -94,6 +112,38 @@ where
             let term_info = term_stream.value();
             let mut block_segment_postings = inverted_index
                 .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
+            loop {
+                let docs = block_segment_postings.docs();
+                if docs.is_empty() {
+                    break;
+                }
+                for &doc in docs {
+                    doc_bitset.insert(doc);
+                }
+                block_segment_postings.advance();
+            }
+        }
+        let doc_bitset = BitSetDocSet::from(doc_bitset);
+        let const_scorer = ConstScorer::new(doc_bitset, boost);
+        Ok(Box::new(const_scorer))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let max_doc = reader.max_doc();
+        let mut doc_bitset = BitSet::with_max_value(max_doc);
+        let inverted_index = reader.inverted_index_async(self.field).await?;
+        let term_dict = inverted_index.terms();
+        let mut term_stream = self.automaton_stream_async(term_dict).await?;
+        while term_stream.advance() {
+            let term_info = term_stream.value();
+            let mut block_segment_postings = inverted_index
+                .read_block_postings_from_terminfo_async(term_info, IndexRecordOption::Basic)
+                .await?;
             loop {
                 let docs = block_segment_postings.docs();
                 if docs.is_empty() {

@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::SegmentComponent;
@@ -33,12 +34,18 @@ impl SegmentMetaInventory {
             .collect::<Vec<_>>()
     }
 
-    pub fn new_segment_meta(&self, segment_id: SegmentId, max_doc: u32) -> SegmentMeta {
+    pub fn new_segment_meta(
+        &self,
+        segment_id: SegmentId,
+        max_doc: u32,
+        segment_attributes: Option<serde_json::Value>,
+    ) -> SegmentMeta {
         let inner = InnerSegmentMeta {
             segment_id,
             max_doc,
             include_temp_doc_store: Arc::new(AtomicBool::new(true)),
             deletes: None,
+            segment_attributes,
         };
         SegmentMeta::from(self.inventory.track(inner))
     }
@@ -175,6 +182,11 @@ impl SegmentMeta {
         self.num_deleted_docs() > 0
     }
 
+    /// Returns segment attributes
+    pub fn segment_attributes(&self) -> &Option<serde_json::Value> {
+        &self.tracked.segment_attributes
+    }
+
     /// Updates the max_doc value from the `SegmentMeta`.
     pub fn with_max_doc(self, max_doc: u32) -> SegmentMeta {
         assert_eq!(self.tracked.max_doc, 0);
@@ -184,6 +196,24 @@ impl SegmentMeta {
             max_doc,
             deletes: None,
             include_temp_doc_store: Arc::new(AtomicBool::new(true)),
+            segment_attributes: inner_meta.segment_attributes.clone(),
+        });
+        SegmentMeta { tracked }
+    }
+
+    /// Update segment attributes in `SegmentMeta`.
+    pub(crate) fn with_segment_attributes(
+        self,
+        segment_attributes: serde_json::Value,
+    ) -> SegmentMeta {
+        let tracked = self.tracked.map(move |inner_meta| InnerSegmentMeta {
+            segment_id: inner_meta.segment_id,
+            max_doc: inner_meta.max_doc,
+            deletes: inner_meta.deletes.clone(),
+            include_temp_doc_store: Arc::new(AtomicBool::new(
+                inner_meta.include_temp_doc_store.load(Ordering::Relaxed),
+            )),
+            segment_attributes: Some(segment_attributes),
         });
         SegmentMeta { tracked }
     }
@@ -204,6 +234,7 @@ impl SegmentMeta {
             max_doc: inner_meta.max_doc,
             include_temp_doc_store: Arc::new(AtomicBool::new(true)),
             deletes: Some(delete_meta),
+            segment_attributes: inner_meta.segment_attributes.clone(),
         });
         SegmentMeta { tracked }
     }
@@ -219,7 +250,10 @@ struct InnerSegmentMeta {
     #[serde(skip)]
     #[serde(default = "default_temp_store")]
     pub(crate) include_temp_doc_store: Arc<AtomicBool>,
+    #[serde(default)]
+    segment_attributes: Option<serde_json::Value>,
 }
+
 fn default_temp_store() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
@@ -235,9 +269,15 @@ impl InnerSegmentMeta {
 fn return_true() -> bool {
     true
 }
+fn return_1() -> usize {
+    1
+}
 
 fn is_true(val: &bool) -> bool {
     *val
+}
+fn is_1(val: &usize) -> bool {
+    *val == 1
 }
 
 /// Search Index Settings.
@@ -252,9 +292,9 @@ pub struct IndexSettings {
     /// If set to true, docstore compression will happen on a dedicated thread.
     /// (defaults: true)
     #[doc(hidden)]
-    #[serde(default = "return_true")]
-    #[serde(skip_serializing_if = "is_true")]
-    pub docstore_compress_dedicated_thread: bool,
+    #[serde(default = "return_1")]
+    #[serde(skip_serializing_if = "is_1")]
+    pub docstore_compress_threads: usize,
     #[serde(default = "default_docstore_blocksize")]
     /// The size of each block that will be compressed and written to disk
     pub docstore_blocksize: usize,
@@ -270,7 +310,7 @@ impl Default for IndexSettings {
         Self {
             docstore_compression: Compressor::default(),
             docstore_blocksize: default_docstore_blocksize(),
-            docstore_compress_dedicated_thread: true,
+            docstore_compress_threads: 1,
         }
     }
 }
@@ -319,6 +359,10 @@ pub struct IndexMeta {
     /// This payload is entirely unused by tantivy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+
+    /// Custom attributes associated with index
+    #[serde(default, alias = "attributes", skip_serializing_if = "Option::is_none")]
+    pub index_attributes: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -330,6 +374,8 @@ struct UntrackedIndexMeta {
     pub opstamp: Opstamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    #[serde(default, alias = "attributes", skip_serializing_if = "Option::is_none")]
+    pub index_attributes: Option<serde_json::Value>,
 }
 
 impl UntrackedIndexMeta {
@@ -344,6 +390,7 @@ impl UntrackedIndexMeta {
             schema: self.schema,
             opstamp: self.opstamp,
             payload: self.payload,
+            index_attributes: self.index_attributes,
         }
     }
 }
@@ -361,6 +408,7 @@ impl IndexMeta {
             schema,
             opstamp: 0u64,
             payload: None,
+            index_attributes: None,
         }
     }
 
@@ -370,6 +418,14 @@ impl IndexMeta {
     ) -> serde_json::Result<IndexMeta> {
         let untracked_meta_json: UntrackedIndexMeta = serde_json::from_str(meta_json)?;
         Ok(untracked_meta_json.track(inventory))
+    }
+
+    /// Returns casted index attributes
+    pub fn index_attributes<A: DeserializeOwned>(&self) -> Result<Option<A>, serde_json::Error> {
+        self.index_attributes
+            .clone()
+            .map(|attributes| serde_json::from_value(attributes))
+            .transpose()
     }
 }
 
@@ -408,6 +464,7 @@ mod tests {
             schema,
             opstamp: 0u64,
             payload: None,
+            index_attributes: None,
         };
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(
@@ -435,12 +492,13 @@ mod tests {
                     compression_level: Some(4),
                 }),
                 docstore_blocksize: 1_000_000,
-                docstore_compress_dedicated_thread: true,
+                docstore_compress_threads: 1,
             },
             segments: Vec::new(),
             schema,
             opstamp: 0u64,
             payload: None,
+            index_attributes: None,
         };
         let json = serde_json::ser::to_string(&index_metas).expect("serialization failed");
         assert_eq!(
@@ -498,8 +556,8 @@ mod tests {
             index_settings,
             IndexSettings {
                 docstore_compression: Compressor::default(),
-                docstore_compress_dedicated_thread: true,
-                docstore_blocksize: 16_384
+                docstore_compress_threads: 1,
+                docstore_blocksize: 16_384,
             }
         );
         {
@@ -516,14 +574,14 @@ mod tests {
             assert_eq!(index_settings_deser, index_settings);
         }
         {
-            index_settings.docstore_compress_dedicated_thread = false;
+            index_settings.docstore_compress_threads = 0;
             let index_settings_json = serde_json::to_value(&index_settings).unwrap();
             assert_eq!(
                 index_settings_json,
                 serde_json::json!({
                     "docstore_compression": "lz4",
                     "docstore_blocksize": 16384,
-                    "docstore_compress_dedicated_thread": false,
+                    "docstore_compress_threads": 0,
                 })
             );
             let index_settings_deser: IndexSettings =

@@ -1,6 +1,7 @@
 use std::io;
 use std::ops::Bound;
 
+use async_trait::async_trait;
 use common::bounds::{map_bound, BoundsRange};
 use common::BitSet;
 
@@ -100,6 +101,7 @@ impl RangeQuery {
     }
 }
 
+#[async_trait]
 impl Query for RangeQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let schema = enable_scoring.schema();
@@ -120,6 +122,13 @@ impl Query for RangeQuery {
                 None,
             )))
         }
+    }
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.weight(enable_scoring)
     }
 }
 
@@ -146,6 +155,7 @@ impl InvertedIndexRangeQuery {
     }
 }
 
+#[async_trait]
 impl Query for InvertedIndexRangeQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let field = self
@@ -160,6 +170,14 @@ impl Query for InvertedIndexRangeQuery {
             &self.bounds.upper_bound,
             self.limit,
         )))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.weight(enable_scoring)
     }
 }
 
@@ -209,8 +227,33 @@ impl InvertedIndexRangeWeight {
         }
         term_stream_builder.into_stream()
     }
+
+    #[cfg(feature = "quickwit")]
+    async fn term_range_async<'a>(
+        &self,
+        term_dict: &'a TermDictionary,
+    ) -> io::Result<TermStreamer<'a>> {
+        use std::ops::Bound::*;
+        let mut term_stream_builder = term_dict.range();
+        term_stream_builder = match self.lower_bound {
+            Included(ref term_val) => term_stream_builder.ge(term_val),
+            Excluded(ref term_val) => term_stream_builder.gt(term_val),
+            Unbounded => term_stream_builder,
+        };
+        term_stream_builder = match self.upper_bound {
+            Included(ref term_val) => term_stream_builder.le(term_val),
+            Excluded(ref term_val) => term_stream_builder.lt(term_val),
+            Unbounded => term_stream_builder,
+        };
+        #[cfg(feature = "quickwit")]
+        if let Some(limit) = self.limit {
+            term_stream_builder = term_stream_builder.limit(limit);
+        }
+        term_stream_builder.into_stream_async().await
+    }
 }
 
+#[async_trait]
 impl Weight for InvertedIndexRangeWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let max_doc = reader.max_doc();
@@ -219,6 +262,44 @@ impl Weight for InvertedIndexRangeWeight {
         let inverted_index = reader.inverted_index(self.field)?;
         let term_dict = inverted_index.terms();
         let mut term_range = self.term_range(term_dict)?;
+        let mut processed_count = 0;
+        while term_range.advance() {
+            if let Some(limit) = self.limit {
+                if limit <= processed_count {
+                    break;
+                }
+            }
+            processed_count += 1;
+            let term_info = term_range.value();
+            let mut block_segment_postings = inverted_index
+                .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
+            loop {
+                let docs = block_segment_postings.docs();
+                if docs.is_empty() {
+                    break;
+                }
+                for &doc in block_segment_postings.docs() {
+                    doc_bitset.insert(doc);
+                }
+                block_segment_postings.advance();
+            }
+        }
+        let doc_bitset = BitSetDocSet::from(doc_bitset);
+        Ok(Box::new(ConstScorer::new(doc_bitset, boost)))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let max_doc = reader.max_doc();
+        let mut doc_bitset = BitSet::with_max_value(max_doc);
+
+        let inverted_index = reader.inverted_index_async(self.field).await?;
+        let term_dict = inverted_index.terms();
+        let mut term_range = self.term_range_async(term_dict).await?;
         let mut processed_count = 0;
         while term_range.advance() {
             if let Some(limit) = self.limit {
@@ -260,6 +341,7 @@ mod tests {
     use std::net::IpAddr;
     use std::ops::Bound;
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use rand::seq::SliceRandom;
 
@@ -351,7 +433,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             let mut index_writer = index.writer_with_num_threads(1, 60_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
             for i in 1..100 {
                 let mut doc = TantivyDocument::new();

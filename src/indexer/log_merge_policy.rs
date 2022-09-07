@@ -141,6 +141,8 @@ impl Default for LogMergePolicy {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use once_cell::sync::Lazy;
 
     use super::*;
@@ -167,7 +169,7 @@ mod tests {
             log_merge_policy.set_min_layer_size(0);
 
             let mut index_writer = index.writer_for_tests()?;
-            index_writer.set_merge_policy(Box::new(log_merge_policy));
+            index_writer.set_merge_policy(Arc::new(log_merge_policy));
 
             // after every commit the merge checker is started, it will merge only segments with 1
             // element in it because of the max_docs_before_merge.
@@ -227,7 +229,7 @@ mod tests {
     }
 
     fn create_random_segment_meta(num_docs: u32) -> SegmentMeta {
-        INVENTORY.new_segment_meta(SegmentId::generate_random(), num_docs)
+        INVENTORY.new_segment_meta(SegmentId::generate_random(), num_docs, None)
     }
 
     #[test]

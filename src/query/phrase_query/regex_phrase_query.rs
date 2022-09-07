@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use super::regex_phrase_weight::RegexPhraseWeight;
 use crate::query::bm25::Bm25Weight;
 use crate::query::{EnableScoring, Query, Weight};
@@ -161,12 +163,70 @@ impl RegexPhraseQuery {
     }
 }
 
+#[cfg(feature = "quickwit")]
+impl RegexPhraseQuery {
+    pub(crate) async fn regex_phrase_weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<RegexPhraseWeight> {
+        let schema = enable_scoring.schema();
+        let field_type = schema.get_field_entry(self.field).field_type().value_type();
+        if field_type != Type::Str {
+            return Err(crate::TantivyError::SchemaError(format!(
+                "RegexPhraseQuery can only be used with a field of type text currently, but got \
+                 {:?}",
+                field_type
+            )));
+        }
+
+        let field_entry = schema.get_field_entry(self.field);
+        let has_positions = field_entry
+            .field_type()
+            .get_index_record_option()
+            .map(IndexRecordOption::has_positions)
+            .unwrap_or(false);
+        if !has_positions {
+            let field_name = field_entry.name();
+            return Err(crate::TantivyError::SchemaError(format!(
+                "Applied phrase query on field {field_name:?}, which does not have positions \
+                 indexed"
+            )));
+        }
+        let terms = self.phrase_terms();
+        let bm25_weight_opt = match enable_scoring {
+            EnableScoring::Enabled {
+                statistics_provider,
+                ..
+            } => Some(Bm25Weight::for_terms_async(statistics_provider, &terms).await?),
+            EnableScoring::Disabled { .. } => None,
+        };
+        let weight = RegexPhraseWeight::new(
+            self.field,
+            self.phrase_terms.clone(),
+            bm25_weight_opt,
+            self.max_expansions,
+            self.slop,
+        );
+        Ok(weight)
+    }
+}
+
+#[async_trait]
 impl Query for RegexPhraseQuery {
     /// Create the weight associated with a query.
     ///
     /// See [`Weight`].
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let phrase_weight = self.regex_phrase_weight(enable_scoring)?;
+        Ok(Box::new(phrase_weight))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        let phrase_weight = self.regex_phrase_weight_async(enable_scoring).await?;
         Ok(Box::new(phrase_weight))
     }
 }

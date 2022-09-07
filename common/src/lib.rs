@@ -29,7 +29,7 @@ pub use writer::{AntiCallToken, CountingWriter, TerminatingWrite};
 /// Has length trait
 pub trait HasLen {
     /// Return length
-    fn len(&self) -> usize;
+    fn len(&self) -> u64;
 
     /// Returns true iff empty.
     fn is_empty(&self) -> bool {
@@ -38,8 +38,8 @@ pub trait HasLen {
 }
 
 impl<T: Deref<Target = [u8]>> HasLen for T {
-    fn len(&self) -> usize {
-        self.deref().len()
+    fn len(&self) -> u64 {
+        self.deref().len() as u64
     }
 }
 

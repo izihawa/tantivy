@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 use std::ops::Deref;
 
+use async_trait::async_trait;
+
 use super::{Collector, SegmentCollector};
 use crate::collector::Fruit;
 use crate::{DocId, Score, SegmentOrdinal, SegmentReader, TantivyError};
@@ -12,6 +14,7 @@ pub struct MultiFruit {
 
 pub struct CollectorWrapper<TCollector: Collector>(TCollector);
 
+#[async_trait]
 impl<TCollector: Collector> Collector for CollectorWrapper<TCollector> {
     type Fruit = Box<dyn Fruit>;
     type Child = Box<dyn BoxableSegmentCollector>;
@@ -22,6 +25,16 @@ impl<TCollector: Collector> Collector for CollectorWrapper<TCollector> {
         reader: &SegmentReader,
     ) -> crate::Result<Box<dyn BoxableSegmentCollector>> {
         let child = self.0.for_segment(segment_local_id, reader)?;
+        Ok(Box::new(SegmentCollectorWrapper(child)))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_segment_async(
+        &self,
+        segment_local_id: u32,
+        reader: &SegmentReader,
+    ) -> crate::Result<Box<dyn BoxableSegmentCollector>> {
+        let child = self.0.for_segment_async(segment_local_id, reader).await?;
         Ok(Box::new(SegmentCollectorWrapper(child)))
     }
 
@@ -67,7 +80,7 @@ impl SegmentCollector for Box<dyn BoxableSegmentCollector> {
     }
 }
 
-pub trait BoxableSegmentCollector {
+pub trait BoxableSegmentCollector: Send {
     fn collect(&mut self, doc: u32, score: Score);
     fn collect_block(&mut self, docs: &[DocId]) {
         for &doc in docs {
@@ -190,7 +203,8 @@ impl<'a> MultiCollector<'a> {
     }
 }
 
-impl Collector for MultiCollector<'_> {
+#[async_trait]
+impl<'a> Collector for MultiCollector<'a> {
     type Fruit = MultiFruit;
     type Child = MultiCollectorChild;
 
@@ -203,6 +217,22 @@ impl Collector for MultiCollector<'_> {
             .collector_wrappers
             .iter()
             .map(|collector_wrapper| collector_wrapper.for_segment(segment_local_id, segment))
+            .collect::<crate::Result<Vec<_>>>()?;
+        Ok(MultiCollectorChild { children })
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_segment_async(
+        &self,
+        segment_local_id: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> crate::Result<MultiCollectorChild> {
+        let children =
+            futures::future::join_all(self.collector_wrappers.iter().map(|collector_wrapper| {
+                collector_wrapper.for_segment_async(segment_local_id, segment)
+            }))
+            .await
+            .into_iter()
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(MultiCollectorChild { children })
     }

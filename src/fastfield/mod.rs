@@ -78,6 +78,7 @@ mod tests {
     use std::net::Ipv6Addr;
     use std::ops::{Range, RangeInclusive};
     use std::path::Path;
+    use std::sync::Arc;
 
     use columnar::StrColumn;
     use common::{ByteCount, DateTimePrecision, HasLen, TerminatingWrite};
@@ -281,7 +282,6 @@ mod tests {
         }
         let file = directory.open_read(path).unwrap();
         assert_eq!(file.len(), 252);
-
         {
             let fast_field_readers = FastFieldReaders::open(file, schema).unwrap();
             let col = fast_field_readers
@@ -417,8 +417,8 @@ mod tests {
         let date_field = schema_builder.add_date_field("date", FAST);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        let mut index_writer = index.writer_for_tests().unwrap();
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
         index_writer
             .add_document(doc!(date_field => DateTime::from_utc(OffsetDateTime::now_utc())))
             .unwrap();
@@ -453,8 +453,8 @@ mod tests {
 
         {
             // first segment
-            let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            let mut index_writer = index.writer_for_tests().unwrap();
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer
                 .add_document(doc!(
                 text_field => "BBBBB", // term ord 1
@@ -538,7 +538,7 @@ mod tests {
         // Merging the segments
         {
             let segment_ids = index.searchable_segment_ids().unwrap();
-            let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
+            let index_writer: IndexWriter = index.writer_for_tests().unwrap();
             index_writer.merge(&segment_ids).wait().unwrap();
             index_writer.wait_merging_threads().unwrap();
         }
@@ -602,7 +602,7 @@ mod tests {
         {
             // first segment
             let mut index_writer = index.writer_for_tests()?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 text_field => "BBBBB", // term_ord 1
             ))?;
@@ -663,7 +663,7 @@ mod tests {
         // Merging the segments
         {
             let segment_ids = index.searchable_segment_ids()?;
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.merge(&segment_ids).wait()?;
             index_writer.wait_merging_threads()?;
         }
@@ -698,7 +698,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
         index_writer.add_document(doc!(
             date_field => DateTime::from_u64(1i64.to_u64()),
             multi_date_field => DateTime::from_u64(2i64.to_u64()),

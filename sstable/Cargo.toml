@@ -1,6 +1,6 @@
 [package]
-name = "tantivy-sstable"
-version = "0.3.0"
+name = "izihawa-tantivy-sstable"
+version = "0.25.0"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/quickwit-oss/tantivy"
@@ -10,13 +10,13 @@ categories = ["database-implementations", "data-structures", "compression"]
 description = "sstables for tantivy"
 
 [dependencies]
-common = {version= "0.7", path="../common", package="tantivy-common"}
+common = {version= "0.25.0", path="../common", package="izihawa-tantivy-common"}
 futures-util = "0.3.30"
 itertools = "0.14.0"
-tantivy-bitpacker = { version= "0.6", path="../bitpacker" }
+tantivy-bitpacker = { version= "0.25.0", path="../bitpacker", package = "izihawa-tantivy-bitpacker" }
 tantivy-fst = "0.5"
 # experimental gives us access to Decompressor::upper_bound
-zstd = { version = "0.13", features = ["experimental"] }
+zstd = { version = "0.13", default-features = false, features = ["experimental"] }
 
 [dev-dependencies]
 proptest = "1"

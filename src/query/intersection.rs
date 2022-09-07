@@ -140,7 +140,7 @@ impl<TDocSet: DocSet, TOtherDocSet: DocSet> DocSet for Intersection<TDocSet, TOt
         self.left.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.left.size_hint()
     }
 }

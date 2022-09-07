@@ -88,8 +88,8 @@ impl DocSet for BitSetDocSet {
     }
 
     /// Returns the number of values set in the underlying bitset.
-    fn size_hint(&self) -> u32 {
-        self.docs.len() as u32
+    fn size_hint(&self) -> u64 {
+        self.docs.len() as u64
     }
 }
 

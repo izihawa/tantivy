@@ -74,14 +74,14 @@ impl TermInfoBlockMeta {
         let doc_freq_addr = positions_start_addr + self.positions_offset_nbits as usize;
 
         let postings_start_offset = self.ref_term_info.postings_range.start
-            + extract_bits(data, posting_start_addr, self.postings_offset_nbits) as usize;
+            + extract_bits(data, posting_start_addr, self.postings_offset_nbits);
         let postings_end_offset = self.ref_term_info.postings_range.start
-            + extract_bits(data, posting_end_addr, self.postings_offset_nbits) as usize;
+            + extract_bits(data, posting_end_addr, self.postings_offset_nbits);
 
         let positions_start_offset = self.ref_term_info.positions_range.start
-            + extract_bits(data, positions_start_addr, self.positions_offset_nbits) as usize;
+            + extract_bits(data, positions_start_addr, self.positions_offset_nbits);
         let positions_end_offset = self.ref_term_info.positions_range.start
-            + extract_bits(data, positions_end_addr, self.positions_offset_nbits) as usize;
+            + extract_bits(data, positions_end_addr, self.positions_offset_nbits);
 
         let doc_freq = extract_bits(data, doc_freq_addr, self.doc_freq_nbits) as u32;
 
@@ -125,7 +125,7 @@ impl TermInfoStore {
     pub fn open(term_info_store_file: FileSlice) -> io::Result<TermInfoStore> {
         let (len_slice, main_slice) = term_info_store_file.split(16);
         let mut bytes = len_slice.read_bytes()?;
-        let len = u64::deserialize(&mut bytes)? as usize;
+        let len = u64::deserialize(&mut bytes)?;
         let num_terms = u64::deserialize(&mut bytes)? as usize;
         let (block_meta_file, term_info_file) = main_slice.split(len);
         let term_info_bytes = term_info_file.read_bytes()?;
@@ -343,7 +343,7 @@ mod tests {
         let mut store_writer = TermInfoStoreWriter::new();
         let mut term_infos = vec![];
         let offset = |i| (i * 13 + i * i);
-        for i in 0usize..1000usize {
+        for i in 0u64..1000u64 {
             let term_info = TermInfo {
                 doc_freq: i as u32,
                 postings_range: offset(i)..offset(i + 1),

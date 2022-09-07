@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use super::term_scorer::TermScorer;
 use crate::docset::{DocSet, COLLECT_BLOCK_BUFFER_LEN};
 use crate::fieldnorm::FieldNormReader;
@@ -14,12 +16,23 @@ pub struct TermWeight {
     term: Term,
     index_record_option: IndexRecordOption,
     similarity_weight: Bm25Weight,
-    scoring_enabled: bool,
+    fieldnorms_enabled: bool,
 }
 
+#[async_trait]
 impl Weight for TermWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let term_scorer = self.specialized_scorer(reader, boost)?;
+        Ok(Box::new(term_scorer))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        let term_scorer = self.specialized_scorer_async(reader, boost).await?;
         Ok(Box::new(term_scorer))
     }
 
@@ -44,6 +57,18 @@ impl Weight for TermWeight {
         }
     }
 
+    #[cfg(feature = "quickwit")]
+    async fn count_async(&self, reader: &SegmentReader) -> crate::Result<u32> {
+        if let Some(alive_bitset) = reader.alive_bitset() {
+            Ok(self.scorer_async(reader, 1.0).await?.count(alive_bitset))
+        } else {
+            let field = self.term.field();
+            let inv_index = reader.inverted_index(field)?;
+            let term_info = inv_index.get_term_info_async(&self.term).await?;
+            Ok(term_info.map(|term_info| term_info.doc_freq).unwrap_or(0))
+        }
+    }
+
     /// Iterates through all of the document matched by the DocSet
     /// `DocSet` and push the scored documents to the collector.
     fn for_each(
@@ -56,6 +81,17 @@ impl Weight for TermWeight {
         Ok(())
     }
 
+    #[cfg(feature = "quickwit")]
+    async fn for_each_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) + Send),
+    ) -> crate::Result<()> {
+        let mut scorer = self.specialized_scorer_async(reader, 1.0).await?;
+        for_each_scorer(&mut scorer, callback);
+        Ok(())
+    }
+
     /// Iterates through all of the document matched by the DocSet
     /// `DocSet` and push the scored documents to the collector.
     fn for_each_no_score(
@@ -64,6 +100,20 @@ impl Weight for TermWeight {
         callback: &mut dyn FnMut(&[DocId]),
     ) -> crate::Result<()> {
         let mut scorer = self.specialized_scorer(reader, 1.0)?;
+        let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
+        for_each_docset_buffered(&mut scorer, &mut buffer, callback);
+        Ok(())
+    }
+
+    /// Iterates through all of the document matched by the DocSet
+    /// `DocSet` and push the scored documents to the collector.
+    #[cfg(feature = "quickwit")]
+    async fn for_each_no_score_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn for<'a> FnMut(&'a [DocId]) + Send),
+    ) -> crate::Result<()> {
+        let mut scorer = self.specialized_scorer_async(reader, 1.0).await?;
         let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
         for_each_docset_buffered(&mut scorer, &mut buffer, callback);
         Ok(())
@@ -89,6 +139,18 @@ impl Weight for TermWeight {
         crate::query::boolean_query::block_wand_single_scorer(scorer, threshold, callback);
         Ok(())
     }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_each_pruning_async(
+        &self,
+        threshold: Score,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) -> Score + Send),
+    ) -> crate::Result<()> {
+        let scorer = self.specialized_scorer_async(reader, 1.0).await?;
+        crate::query::boolean_query::block_wand_single_scorer(scorer, threshold, callback);
+        Ok(())
+    }
 }
 
 impl TermWeight {
@@ -96,13 +158,13 @@ impl TermWeight {
         term: Term,
         index_record_option: IndexRecordOption,
         similarity_weight: Bm25Weight,
-        scoring_enabled: bool,
+        fieldnorms_enabled: bool,
     ) -> TermWeight {
         TermWeight {
             term,
             index_record_option,
             similarity_weight,
-            scoring_enabled,
+            fieldnorms_enabled,
         }
     }
 
@@ -117,7 +179,7 @@ impl TermWeight {
     ) -> crate::Result<TermScorer> {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
-        let fieldnorm_reader_opt = if self.scoring_enabled {
+        let fieldnorm_reader_opt = if self.fieldnorms_enabled {
             reader.fieldnorms_readers().get_field(field)?
         } else {
             None
@@ -127,6 +189,40 @@ impl TermWeight {
         let similarity_weight = self.similarity_weight.boost_by(boost);
         let postings_opt: Option<SegmentPostings> =
             inverted_index.read_postings(&self.term, self.index_record_option)?;
+        if let Some(segment_postings) = postings_opt {
+            Ok(TermScorer::new(
+                segment_postings,
+                fieldnorm_reader,
+                similarity_weight,
+            ))
+        } else {
+            Ok(TermScorer::new(
+                SegmentPostings::empty(),
+                fieldnorm_reader,
+                similarity_weight,
+            ))
+        }
+    }
+
+    #[cfg(feature = "quickwit")]
+    pub(crate) async fn specialized_scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<TermScorer> {
+        let field = self.term.field();
+        let inverted_index = reader.inverted_index_async(field).await?;
+        let fieldnorm_reader_opt = if self.fieldnorms_enabled {
+            reader.fieldnorms_readers().get_field_async(field).await?
+        } else {
+            None
+        };
+        let fieldnorm_reader =
+            fieldnorm_reader_opt.unwrap_or_else(|| FieldNormReader::constant(reader.max_doc(), 1));
+        let similarity_weight = self.similarity_weight.boost_by(boost);
+        let postings_opt: Option<SegmentPostings> = inverted_index
+            .read_postings_async(&self.term, self.index_record_option)
+            .await?;
         if let Some(segment_postings) = postings_opt {
             Ok(TermScorer::new(
                 segment_postings,

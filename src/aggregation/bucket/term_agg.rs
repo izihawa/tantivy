@@ -660,6 +660,7 @@ pub(crate) fn cut_off_buckets<T: GetDocCount + Debug>(
 mod tests {
     use std::net::IpAddr;
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use common::DateTime;
     use time::{Date, Month};
@@ -1272,7 +1273,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             // writing the segment
             index_writer.add_document(doc!(
                 string_field_1 => "A".to_string(),
@@ -1585,7 +1586,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 bytes_field => vec![1,2,3],
             ))?;
@@ -1623,7 +1624,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 text_field => "Hello Hello",
                 text_field => "Hello Hello",
@@ -1711,7 +1712,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 id_field => 1u64,
             ))?;
@@ -1751,7 +1752,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 id_field => 9_223_372_036_854_775_807u64,
             ))?;
@@ -1799,7 +1800,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             index_writer.add_document(doc!(
                 text_field => "Hello Hello",
                 id_field => 1u64,
@@ -1886,7 +1887,7 @@ mod tests {
         let index = Index::create_in_ram(schema_builder.build());
         {
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             // Empty segment special case
             index_writer.add_document(doc!())?;
             index_writer.commit()?;

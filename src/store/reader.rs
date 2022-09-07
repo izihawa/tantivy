@@ -6,7 +6,7 @@ use std::ops::{AddAssign, Range};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{BinarySerializable, OwnedBytes};
+use common::{BinarySerializable, HasLen, OwnedBytes};
 use lru::LruCache;
 
 use super::footer::DocStoreFooter;
@@ -71,13 +71,13 @@ pub struct StoreReader {
 
 /// The cache for decompressed blocks.
 struct BlockCache {
-    cache: Option<Mutex<LruCache<usize, Block>>>,
+    cache: Option<Mutex<LruCache<u64, Block>>>,
     cache_hits: AtomicUsize,
     cache_misses: AtomicUsize,
 }
 
 impl BlockCache {
-    fn get_from_cache(&self, pos: usize) -> Option<Block> {
+    fn get_from_cache(&self, pos: u64) -> Option<Block> {
         if let Some(block) = self
             .cache
             .as_ref()
@@ -90,7 +90,7 @@ impl BlockCache {
         None
     }
 
-    fn put_into_cache(&self, pos: usize, data: Block) {
+    fn put_into_cache(&self, pos: u64, data: Block) {
         if let Some(cache) = self.cache.as_ref() {
             cache.lock().unwrap().put(pos, data);
         }
@@ -100,18 +100,18 @@ impl BlockCache {
         CacheStats {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
-            num_entries: self.len(),
+            num_entries: self.len() as usize,
         }
     }
 
-    fn len(&self) -> usize {
+    fn len(&self) -> u64 {
         self.cache
             .as_ref()
-            .map_or(0, |cache| cache.lock().unwrap().len())
+            .map_or(0, |cache| cache.lock().unwrap().len() as u64)
     }
 
     #[cfg(test)]
-    fn peek_lru(&self) -> Option<usize> {
+    fn peek_lru(&self) -> Option<u64> {
         self.cache
             .as_ref()
             .and_then(|cache| cache.lock().unwrap().peek_lru().map(|(&k, _)| k))
@@ -157,7 +157,7 @@ impl StoreReader {
     pub fn open(store_file: FileSlice, cache_num_blocks: usize) -> io::Result<StoreReader> {
         let (footer, data_and_offset) = DocStoreFooter::extract_footer(store_file)?;
 
-        let (data_file, offset_index_file) = data_and_offset.split(footer.offset as usize);
+        let (data_file, offset_index_file) = data_and_offset.split(footer.offset);
         let index_data = offset_index_file.read_bytes()?;
         let space_usage =
             StoreSpaceUsage::new(data_file.num_bytes(), offset_index_file.num_bytes());
@@ -376,6 +376,31 @@ fn block_read_index(block: &[u8], doc_pos: u32) -> crate::Result<Range<usize>> {
 
 #[cfg(feature = "quickwit")]
 impl StoreReader {
+    pub async fn open_async(
+        store_file: FileSlice,
+        cache_num_blocks: usize,
+    ) -> io::Result<StoreReader> {
+        let (footer, data_and_offset) = DocStoreFooter::extract_footer_async(store_file).await?;
+
+        let (data_file, offset_index_file) = data_and_offset.split(footer.offset);
+        let index_data = offset_index_file.read_bytes_async().await?;
+        let space_usage =
+            StoreSpaceUsage::new(data_file.num_bytes(), offset_index_file.len().into());
+        let skip_index = SkipIndex::open(index_data);
+        Ok(StoreReader {
+            decompressor: footer.decompressor,
+            doc_store_version: footer.doc_store_version,
+            data: data_file,
+            cache: BlockCache {
+                cache: NonZeroUsize::new(cache_num_blocks)
+                    .map(|cache_num_blocks| Mutex::new(LruCache::new(cache_num_blocks))),
+                cache_hits: Default::default(),
+                cache_misses: Default::default(),
+            },
+            skip_index: Arc::new(skip_index),
+            space_usage,
+        })
+    }
     /// Advanced API.
     ///
     /// In most cases use [`get_async`](Self::get_async)
@@ -463,7 +488,7 @@ mod tests {
         let directory = RamDirectory::create();
         let path = Path::new("store");
         let writer = directory.open_write(path)?;
-        let schema = write_lorem_ipsum_store(writer, 500, Compressor::default(), BLOCK_SIZE, true);
+        let schema = write_lorem_ipsum_store(writer, 500, Compressor::default(), BLOCK_SIZE, 1);
         let title = schema.get_field("title").unwrap();
         let store_file = directory.open_read(path)?;
         let store = StoreReader::open(store_file, DOCSTORE_CACHE_CAPACITY)?;

@@ -11,6 +11,7 @@ pub struct SingleSegmentIndexWriter<D: Document = TantivyDocument> {
     segment_writer: SegmentWriter,
     segment: Segment,
     opstamp: Opstamp,
+    segment_attributes: Option<serde_json::Value>,
     _phantom: PhantomData<D>,
 }
 
@@ -22,8 +23,13 @@ impl<D: Document> SingleSegmentIndexWriter<D> {
             segment_writer,
             segment,
             opstamp: 0,
+            segment_attributes: None,
             _phantom: PhantomData,
         })
+    }
+
+    pub fn set_segment_attributes(&mut self, segment_attributes: serde_json::Value) {
+        self.segment_attributes = Some(segment_attributes)
     }
 
     pub fn mem_usage(&self) -> usize {
@@ -48,6 +54,7 @@ impl<D: Document> SingleSegmentIndexWriter<D> {
             schema: index.schema(),
             opstamp: 0,
             payload: None,
+            index_attributes: self.segment_attributes,
         };
         save_metas(&index_meta, index.directory())?;
         index.directory().sync_directory()?;

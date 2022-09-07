@@ -62,7 +62,7 @@ impl DocStoreFooter {
     }
 
     pub fn extract_footer(file: FileSlice) -> io::Result<(DocStoreFooter, FileSlice)> {
-        if file.len() < DocStoreFooter::SIZE_IN_BYTES {
+        if file.len() < DocStoreFooter::SIZE_IN_BYTES as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
@@ -71,8 +71,25 @@ impl DocStoreFooter {
                 ),
             ));
         }
-        let (body, footer_slice) = file.split_from_end(DocStoreFooter::SIZE_IN_BYTES);
+        let (body, footer_slice) = file.split_from_end(DocStoreFooter::SIZE_IN_BYTES as u64);
         let mut footer_bytes = footer_slice.read_bytes()?;
+        let footer = DocStoreFooter::deserialize(&mut footer_bytes)?;
+        Ok((footer, body))
+    }
+
+    #[cfg(feature = "quickwit")]
+    pub async fn extract_footer_async(file: FileSlice) -> io::Result<(DocStoreFooter, FileSlice)> {
+        if file.len() < DocStoreFooter::SIZE_IN_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "File corrupted. The file is smaller than Footer::SIZE_IN_BYTES (len={}).",
+                    file.len()
+                ),
+            ));
+        }
+        let (body, footer_slice) = file.split_from_end(DocStoreFooter::SIZE_IN_BYTES as u64);
+        let mut footer_bytes = footer_slice.read_bytes_async().await?;
         let footer = DocStoreFooter::deserialize(&mut footer_bytes)?;
         Ok((footer, body))
     }

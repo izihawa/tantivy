@@ -38,7 +38,7 @@ impl<TPostings: Postings> DocSet for PostingsWithOffset<TPostings> {
         self.postings.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.postings.size_hint()
     }
 }
@@ -532,7 +532,7 @@ impl<TPostings: Postings> DocSet for PhraseScorer<TPostings> {
         self.intersection_docset.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.intersection_docset.size_hint()
     }
 }

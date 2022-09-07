@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::collector::Count;
 use crate::directory::{RamDirectory, WatchCallback};
 use crate::index::SegmentId;
@@ -307,8 +309,8 @@ fn test_merging_segment_update_docfreq() {
     let id_field = schema_builder.add_text_field("id", STRING);
     let schema = schema_builder.build();
     let index = Index::create_in_ram(schema);
-    let mut writer: IndexWriter = index.writer_for_tests().unwrap();
-    writer.set_merge_policy(Box::new(NoMergePolicy));
+    let mut writer = index.writer_for_tests().unwrap();
+    writer.set_merge_policy(Arc::new(NoMergePolicy));
     for _ in 0..5 {
         writer.add_document(doc!(text_field=>"hello")).unwrap();
     }
@@ -356,7 +358,7 @@ fn test_positions_merge_bug_non_text_json_vint() {
     let mut writer: IndexWriter = index.writer_for_tests().unwrap();
     let mut merge_policy = LogMergePolicy::default();
     merge_policy.set_min_num_segments(2);
-    writer.set_merge_policy(Box::new(merge_policy));
+    writer.set_merge_policy(Arc::new(merge_policy));
     // Here a string would work.
     let doc_json = r#"{"tenant_id":75}"#;
     let vals = serde_json::from_str(doc_json).unwrap();
@@ -381,7 +383,7 @@ fn test_positions_merge_bug_non_text_json_bitpacked_block() {
     let mut writer: IndexWriter = index.writer_for_tests().unwrap();
     let mut merge_policy = LogMergePolicy::default();
     merge_policy.set_min_num_segments(2);
-    writer.set_merge_policy(Box::new(merge_policy));
+    writer.set_merge_policy(Arc::new(merge_policy));
     // Here a string would work.
     let doc_json = r#"{"tenant_id":75}"#;
     let vals = serde_json::from_str(doc_json).unwrap();

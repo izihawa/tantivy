@@ -12,7 +12,8 @@ const VINT_MODE: u8 = 1u8;
 const BLOCK_LEN: usize = 4_000;
 
 pub struct DeltaWriter<W, TValueWriter>
-where W: io::Write
+where
+    W: io::Write,
 {
     block: Vec<u8>,
     write: CountingWriter<BufWriter<W>>,
@@ -41,11 +42,11 @@ where
         self.block_len = block_len
     }
 
-    pub fn flush_block(&mut self) -> io::Result<Option<Range<usize>>> {
+    pub fn flush_block(&mut self) -> io::Result<Option<Range<u64>>> {
         if self.block.is_empty() {
             return Ok(None);
         }
-        let start_offset = self.write.written_bytes() as usize;
+        let start_offset = self.write.written_bytes();
 
         let buffer: &mut Vec<u8> = &mut self.stateless_buffer;
         self.value_writer.serialize_block(buffer);
@@ -81,7 +82,7 @@ where
             self.write.write_all(&self.block[..])?;
         }
 
-        let end_offset = self.write.written_bytes() as usize;
+        let end_offset = self.write.written_bytes();
         self.block.clear();
         buffer.clear();
         Ok(Some(start_offset..end_offset))
@@ -110,7 +111,7 @@ where
         self.value_writer.write(value);
     }
 
-    pub fn flush_block_if_required(&mut self) -> io::Result<Option<Range<usize>>> {
+    pub fn flush_block_if_required(&mut self) -> io::Result<Option<Range<u64>>> {
         if self.block.len() > self.block_len {
             return self.flush_block();
         }
@@ -131,7 +132,8 @@ pub struct DeltaReader<TValueReader> {
 }
 
 impl<TValueReader> DeltaReader<TValueReader>
-where TValueReader: value::ValueReader
+where
+    TValueReader: value::ValueReader,
 {
     pub fn new(reader: OwnedBytes) -> Self {
         DeltaReader {

@@ -173,8 +173,8 @@ impl<T: Send + Sync + PartialOrd + Copy + Debug + 'static> DocSet for RangeDocSe
         doc
     }
 
-    fn size_hint(&self) -> u32 {
-        self.column.num_docs()
+    fn size_hint(&self) -> u64 {
+        self.column.num_docs() as u64
     }
 }
 

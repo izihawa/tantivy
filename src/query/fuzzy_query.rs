@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use once_cell::sync::OnceCell;
 use tantivy_fst::Automaton;
@@ -174,14 +175,24 @@ impl FuzzyTermQuery {
     }
 }
 
+#[async_trait]
 impl Query for FuzzyTermQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight()?))
+    }
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.weight(enable_scoring)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::FuzzyTermQuery;
     use crate::collector::{Count, TopDocs};
     use crate::indexer::NoMergePolicy;
@@ -200,7 +211,7 @@ mod test {
         let index = Index::create_in_ram(schema.clone());
 
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
         let doc = TantivyDocument::parse_json(
             &schema,
             r#"{

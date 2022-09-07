@@ -3,6 +3,7 @@ use std::fmt;
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::query::{EnableScoring, Explanation, Query, Scorer, Weight};
 use crate::{DocId, DocSet, Score, SegmentReader, TantivyError, Term};
+use async_trait::async_trait;
 
 /// `ConstScoreQuery` is a wrapper over a query to provide a constant score.
 /// It can avoid unnecessary score computation on the wrapped query.
@@ -36,9 +37,23 @@ impl fmt::Debug for ConstScoreQuery {
     }
 }
 
+#[async_trait]
 impl Query for ConstScoreQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let inner_weight = self.query.weight(enable_scoring)?;
+        Ok(if enable_scoring.is_scoring_enabled() {
+            Box::new(ConstWeight::new(inner_weight, self.score))
+        } else {
+            inner_weight
+        })
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        let inner_weight = self.query.weight_async(enable_scoring).await?;
         Ok(if enable_scoring.is_scoring_enabled() {
             Box::new(ConstWeight::new(inner_weight, self.score))
         } else {
@@ -127,7 +142,7 @@ impl<TDocSet: DocSet> DocSet for ConstScorer<TDocSet> {
         self.docset.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.docset.size_hint()
     }
 }

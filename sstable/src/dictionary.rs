@@ -101,7 +101,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         key_range: impl RangeBounds<[u8]>,
         limit: Option<u64>,
         automaton: &impl Automaton,
-        merge_holes_under_bytes: usize,
+        merge_holes_under_bytes: u64,
     ) -> io::Result<DeltaReader<TSSTable::ValueReader>> {
         let match_all = automaton.will_always_match(&automaton.start());
         if match_all {
@@ -242,7 +242,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         &'a self,
         key_range: impl RangeBounds<[u8]>,
         automaton: &'a impl Automaton,
-        merge_holes_under_bytes: usize,
+        merge_holes_under_bytes: u64,
     ) -> impl Iterator<Item = BlockAddr> + 'a {
         let lower_bound = match key_range.start_bound() {
             Bound::Included(key) | Bound::Excluded(key) => {
@@ -281,7 +281,17 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
         let index_offset = u64::deserialize(&mut footer_len_bytes)?;
         let num_terms = u64::deserialize(&mut footer_len_bytes)?;
         let version = u32::deserialize(&mut footer_len_bytes)?;
-        let (sstable_slice, index_slice) = main_slice.split(index_offset as usize);
+        if version != crate::SSTABLE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Unsuported sstable version, expected {version}, found {}",
+                    crate::SSTABLE_VERSION,
+                ),
+            ));
+        }
+
+        let (sstable_slice, index_slice) = main_slice.split(index_offset);
         let sstable_index_bytes = index_slice.read_bytes()?;
 
         let sstable_index = match version {
@@ -302,7 +312,63 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
                 } else {
                     // if store_offset is zero, there is no index, so we build a pseudo-index
                     // assuming a single block of sstable covering everything.
-                    SSTableIndex::V3Empty(SSTableIndexV3Empty::load(index_offset as usize))
+                    SSTableIndex::V3Empty(SSTableIndexV3Empty::load(index_offset))
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Unsuported sstable version, expected one of [2, 3], found {version}"),
+                ))
+            }
+        };
+
+        Ok(Dictionary {
+            sstable_slice,
+            sstable_index,
+            num_terms,
+            phantom_data: PhantomData,
+        })
+    }
+
+    pub async fn open_async(term_dictionary_file: FileSlice) -> io::Result<Self> {
+        let (main_slice, footer_len_slice) = term_dictionary_file.split_from_end(20);
+        let mut footer_len_bytes: OwnedBytes = footer_len_slice.read_bytes_async().await?;
+        let index_offset = u64::deserialize(&mut footer_len_bytes)?;
+        let num_terms = u64::deserialize(&mut footer_len_bytes)?;
+        let version = u32::deserialize(&mut footer_len_bytes)?;
+        if version != crate::SSTABLE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "Unsuported sstable version, expected {version}, found {}",
+                    crate::SSTABLE_VERSION,
+                ),
+            ));
+        }
+
+        let (sstable_slice, index_slice) = main_slice.split(index_offset);
+        let sstable_index_bytes = index_slice.read_bytes_async().await?;
+
+        let sstable_index = match version {
+            2 => SSTableIndex::V2(
+                crate::sstable_index_v2::SSTableIndex::load(sstable_index_bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "SSTable corruption")
+                })?,
+            ),
+            3 => {
+                let (sstable_index_bytes, mut footerv3_len_bytes) = sstable_index_bytes.rsplit(8);
+                let store_offset = u64::deserialize(&mut footerv3_len_bytes)?;
+                if store_offset != 0 {
+                    SSTableIndex::V3(
+                        SSTableIndexV3::load(sstable_index_bytes, store_offset).map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidData, "SSTable corruption")
+                        })?,
+                    )
+                } else {
+                    // if store_offset is zero, there is no index, so we build a pseudo-index
+                    // assuming a single block of sstable covering everything.
+                    SSTableIndex::V3Empty(SSTableIndexV3Empty::load(index_offset))
                 }
             }
             _ => {
@@ -617,18 +683,25 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
     /// Returns a search builder, to stream all of the terms
     /// within the Automaton
-    pub fn search<'a, A: Automaton + 'a>(
+    pub fn search<'a, A: Automaton + 'a + Send>(
         &'a self,
         automaton: A,
     ) -> StreamerBuilder<'a, TSSTable, A>
     where
         A::State: Clone,
+        <A as Automaton>::State: Send,
     {
         StreamerBuilder::<TSSTable, A>::new(self, automaton)
     }
 
     #[doc(hidden)]
-    pub async fn warm_up_dictionary(&self) -> io::Result<()> {
+    pub fn warm_up_dictionary(&self) -> io::Result<()> {
+        self.sstable_slice.read_bytes()?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn warm_up_dictionary_async(&self) -> io::Result<()> {
         self.sstable_slice.read_bytes_async().await?;
         Ok(())
     }
@@ -648,19 +721,19 @@ mod tests {
     #[derive(Debug)]
     struct PermissionedHandle {
         bytes: OwnedBytes,
-        allowed_range: Mutex<Range<usize>>,
+        allowed_range: Mutex<Range<u64>>,
     }
 
     impl PermissionedHandle {
         fn new(bytes: Vec<u8>) -> Self {
             let bytes = OwnedBytes::new(bytes);
             PermissionedHandle {
-                allowed_range: Mutex::new(0..bytes.len()),
+                allowed_range: Mutex::new(0..bytes.len() as u64),
                 bytes,
             }
         }
 
-        fn restrict(&self, range: Range<usize>) {
+        fn restrict(&self, range: Range<u64>) {
             *self.allowed_range.lock().unwrap() = range;
         }
     }
@@ -672,7 +745,7 @@ mod tests {
     }
 
     impl common::file_slice::FileHandle for PermissionedHandle {
-        fn read_bytes(&self, range: Range<usize>) -> std::io::Result<OwnedBytes> {
+        fn read_bytes(&self, range: Range<u64>) -> std::io::Result<OwnedBytes> {
             let allowed_range = self.allowed_range.lock().unwrap();
             if !allowed_range.contains(&range.start) || !allowed_range.contains(&(range.end - 1)) {
                 return Err(std::io::Error::new(
@@ -681,7 +754,7 @@ mod tests {
                 ));
             }
 
-            Ok(self.bytes.slice(range))
+            Ok(self.bytes.slice(range.start as usize..range.end as usize))
         }
     }
 
@@ -899,7 +972,7 @@ mod tests {
         assert!(dic.get(b"~~~").unwrap().is_none());
         assert!(dic.term_ord(b"~~~").unwrap().is_none());
 
-        slice.restrict(0..slice.bytes.len());
+        slice.restrict(0..slice.bytes.len() as u64);
         // between 1000F and 10010, test case where matched prefix > prefix kept
         assert!(dic.term_ord(b"1000G").unwrap().is_none());
         // shorter than 10000, tests prefix case
@@ -1006,7 +1079,7 @@ mod tests {
         }
         // there might be more successful elements after, though how many is undefined
 
-        slice.restrict(0..slice.bytes.len());
+        slice.restrict(0..slice.bytes.len() as u64);
 
         let mut stream = dic.stream().unwrap();
         for i in 0..0x3ffff {

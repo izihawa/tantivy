@@ -88,19 +88,12 @@ fn split_into_skips_and_postings(
 }
 
 impl BlockSegmentPostings {
-    /// Opens a `BlockSegmentPostings`.
-    /// `doc_freq` is the number of documents in the posting list.
-    /// `record_option` represents the amount of data available according to the schema.
-    /// `requested_option` is the amount of data requested by the user.
-    /// If for instance, we do not request for term frequencies, this function will not decompress
-    /// term frequency blocks.
-    pub(crate) fn open(
+    fn internal_open(
         doc_freq: u32,
-        data: FileSlice,
+        bytes: OwnedBytes,
         mut record_option: IndexRecordOption,
         requested_option: IndexRecordOption,
     ) -> io::Result<BlockSegmentPostings> {
-        let bytes = data.read_bytes()?;
         let (skip_data_opt, postings_data) = split_into_skips_and_postings(doc_freq, bytes)?;
         let skip_reader = match skip_data_opt {
             Some(skip_data) => {
@@ -137,6 +130,27 @@ impl BlockSegmentPostings {
         };
         block_segment_postings.load_block();
         Ok(block_segment_postings)
+    }
+
+    pub(crate) fn open(
+        doc_freq: u32,
+        data: FileSlice,
+        record_option: IndexRecordOption,
+        requested_option: IndexRecordOption,
+    ) -> io::Result<BlockSegmentPostings> {
+        let bytes = data.read_bytes()?;
+        Self::internal_open(doc_freq, bytes, record_option, requested_option)
+    }
+
+    #[cfg(feature = "quickwit")]
+    pub(crate) async fn open_async(
+        doc_freq: u32,
+        data: FileSlice,
+        record_option: IndexRecordOption,
+        requested_option: IndexRecordOption,
+    ) -> io::Result<BlockSegmentPostings> {
+        let bytes = data.read_bytes_async().await?;
+        Self::internal_open(doc_freq, bytes, record_option, requested_option)
     }
 
     /// Returns the block_max_score for the current block.

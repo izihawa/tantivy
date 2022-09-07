@@ -35,9 +35,9 @@ impl StoreWriter {
         writer: WritePtr,
         compressor: Compressor,
         block_size: usize,
-        dedicated_thread: bool,
+        threads: usize,
     ) -> io::Result<StoreWriter> {
-        let block_compressor = BlockCompressor::new(compressor, writer, dedicated_thread)?;
+        let block_compressor = BlockCompressor::new(compressor, writer, threads)?;
         Ok(StoreWriter {
             compressor,
             block_size,

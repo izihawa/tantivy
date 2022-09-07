@@ -66,7 +66,7 @@ fn read_all_columns_in_stream(
         let column_type = ColumnType::try_from_code(column_code)
             .map_err(|_| io_invalid_data(format!("Unknown column code `{column_code}`")))?;
         let range = stream.value();
-        let file_slice = column_data.slice(range.start as usize..range.end as usize);
+        let file_slice = column_data.slice(range.start..range.end);
         let dynamic_column_handle = DynamicColumnHandle {
             file_slice,
             column_type,
@@ -93,21 +93,50 @@ fn column_dictionary_prefix_for_subpath(root_path: &str) -> String {
 impl ColumnarReader {
     /// Opens a new Columnar file.
     pub fn open<F>(file_slice: F) -> io::Result<ColumnarReader>
-    where FileSlice: From<F> {
+    where
+        FileSlice: From<F>,
+    {
         Self::open_inner(file_slice.into())
     }
 
+    pub async fn open_async<F>(file_slice: F) -> io::Result<ColumnarReader>
+    where
+        FileSlice: From<F>,
+    {
+        Self::open_inner_async(file_slice.into()).await
+    }
+
+    pub async fn open_inner_async(file_slice: FileSlice) -> io::Result<ColumnarReader> {
+        let (file_slice_without_sstable_len, footer_slice) = file_slice.split_from_end(
+            (mem::size_of::<u64>() + 4 + format_version::VERSION_FOOTER_NUM_BYTES) as u64,
+        );
+        let footer_bytes = footer_slice.read_bytes_async().await?;
+        let sstable_len = u64::deserialize(&mut &footer_bytes[0..8])?;
+        let num_rows = u32::deserialize(&mut &footer_bytes[8..12])?;
+        let version_footer_bytes: [u8; format_version::VERSION_FOOTER_NUM_BYTES] =
+            footer_bytes[12..].try_into().unwrap();
+        let format_version = format_version::parse_footer(version_footer_bytes)?;
+        let (column_data, sstable) = file_slice_without_sstable_len.split_from_end(sstable_len);
+        let column_dictionary = Dictionary::open_async(sstable).await?;
+        Ok(ColumnarReader {
+            column_dictionary,
+            column_data,
+            num_rows,
+            format_version,
+        })
+    }
+
     fn open_inner(file_slice: FileSlice) -> io::Result<ColumnarReader> {
-        let (file_slice_without_sstable_len, footer_slice) = file_slice
-            .split_from_end(mem::size_of::<u64>() + 4 + format_version::VERSION_FOOTER_NUM_BYTES);
+        let (file_slice_without_sstable_len, footer_slice) = file_slice.split_from_end(
+            (mem::size_of::<u64>() + 4 + format_version::VERSION_FOOTER_NUM_BYTES) as u64,
+        );
         let footer_bytes = footer_slice.read_bytes()?;
         let sstable_len = u64::deserialize(&mut &footer_bytes[0..8])?;
         let num_rows = u32::deserialize(&mut &footer_bytes[8..12])?;
         let version_footer_bytes: [u8; format_version::VERSION_FOOTER_NUM_BYTES] =
             footer_bytes[12..].try_into().unwrap();
         let format_version = format_version::parse_footer(version_footer_bytes)?;
-        let (column_data, sstable) =
-            file_slice_without_sstable_len.split_from_end(sstable_len as usize);
+        let (column_data, sstable) = file_slice_without_sstable_len.split_from_end(sstable_len);
         let column_dictionary = Dictionary::open(sstable)?;
         Ok(ColumnarReader {
             column_dictionary,
@@ -138,9 +167,7 @@ impl ColumnarReader {
                 let column_name =
                 // The last two bytes are respectively the 0u8 separator and the column_type.
                 String::from_utf8_lossy(&key_bytes[..key_bytes.len() - 2]).to_string();
-                let file_slice = self
-                    .column_data
-                    .slice(range.start as usize..range.end as usize);
+                let file_slice = self.column_data.slice(range);
                 let column_handle = DynamicColumnHandle {
                     file_slice,
                     column_type,

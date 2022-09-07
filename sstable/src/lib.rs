@@ -46,9 +46,9 @@ pub struct SSTableDataCorruption;
 
 /// SSTable makes it possible to read and write
 /// sstables with typed values.
-pub trait SSTable: Sized {
+pub trait SSTable: Send + Sized {
     type Value: Clone;
-    type ValueReader: ValueReader<Value = Self::Value>;
+    type ValueReader: ValueReader<Value = Self::Value> + Send;
     type ValueWriter: ValueWriter<Value = Self::Value>;
 
     fn delta_writer<W: io::Write>(write: W) -> DeltaWriter<W, Self::ValueWriter> {
@@ -137,7 +137,8 @@ pub struct Reader<TValueReader> {
 }
 
 impl<TValueReader> Reader<TValueReader>
-where TValueReader: ValueReader
+where
+    TValueReader: ValueReader,
 {
     pub fn advance(&mut self) -> io::Result<bool> {
         if !self.delta_reader.advance()? {
@@ -170,7 +171,8 @@ impl<TValueReader> AsRef<[u8]> for Reader<TValueReader> {
 }
 
 pub struct Writer<W, TValueWriter>
-where W: io::Write
+where
+    W: io::Write,
 {
     previous_key: Vec<u8>,
     index_builder: SSTableIndexBuilder,

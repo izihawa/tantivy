@@ -1,5 +1,7 @@
 use std::fmt;
 
+use async_trait::async_trait;
+
 use super::term_weight::TermWeight;
 use crate::query::bm25::Bm25Weight;
 use crate::query::{EnableScoring, Explanation, Query, Weight};
@@ -80,6 +82,35 @@ impl TermQuery {
         &self.term
     }
 
+    fn check_field(&self, enable_scoring: EnableScoring<'_>) -> Result<(), crate::TantivyError> {
+        let schema = enable_scoring.schema();
+        let field_entry = schema.get_field_entry(self.term.field());
+        if !field_entry.is_indexed() {
+            let error_msg = format!("Field {:?} is not indexed.", field_entry.name());
+            return Err(crate::TantivyError::SchemaError(error_msg));
+        }
+        Ok(())
+    }
+
+    fn create_term_weight(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+        bm25_weight: Bm25Weight,
+    ) -> TermWeight {
+        let scoring_enabled = enable_scoring.is_scoring_enabled();
+        let index_record_option = if scoring_enabled {
+            self.index_record_option
+        } else {
+            IndexRecordOption::Basic
+        };
+        TermWeight::new(
+            self.term.clone(),
+            index_record_option,
+            bm25_weight,
+            enable_scoring.is_fieldnorms_enabled(),
+        )
+    }
+
     /// Returns a weight object.
     ///
     /// While `.weight(...)` returns a boxed trait object,
@@ -89,12 +120,7 @@ impl TermQuery {
         &self,
         enable_scoring: EnableScoring<'_>,
     ) -> crate::Result<TermWeight> {
-        let schema = enable_scoring.schema();
-        let field_entry = schema.get_field_entry(self.term.field());
-        if !field_entry.is_indexed() {
-            let error_msg = format!("Field {:?} is not indexed.", field_entry.name());
-            return Err(crate::TantivyError::SchemaError(error_msg));
-        }
+        self.check_field(enable_scoring)?;
         let bm25_weight = match enable_scoring {
             EnableScoring::Enabled {
                 statistics_provider,
@@ -104,26 +130,47 @@ impl TermQuery {
                 Bm25Weight::new(Explanation::new("<no score>", 1.0f32), 1.0f32)
             }
         };
-        let scoring_enabled = enable_scoring.is_scoring_enabled();
-        let index_record_option = if scoring_enabled {
-            self.index_record_option
-        } else {
-            IndexRecordOption::Basic
-        };
+        Ok(self.create_term_weight(enable_scoring, bm25_weight))
+    }
 
-        Ok(TermWeight::new(
-            self.term.clone(),
-            index_record_option,
-            bm25_weight,
-            scoring_enabled,
-        ))
+    /// Returns a weight object asynchronously.
+    ///
+    /// See [`Self::specialized_weight()`]
+    #[cfg(feature = "quickwit")]
+    pub async fn specialized_weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<TermWeight> {
+        self.check_field(enable_scoring)?;
+        let bm25_weight = match enable_scoring {
+            EnableScoring::Enabled {
+                statistics_provider,
+                ..
+            } => Bm25Weight::for_terms_async(statistics_provider, &[self.term.clone()]).await?,
+            EnableScoring::Disabled { .. } => {
+                Bm25Weight::new(Explanation::new("<no score>", 1.0f32), 1.0f32)
+            }
+        };
+        Ok(self.create_term_weight(enable_scoring, bm25_weight))
     }
 }
 
+#[async_trait]
 impl Query for TermQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight(enable_scoring)?))
     }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        Ok(Box::new(
+            self.specialized_weight_async(enable_scoring).await?,
+        ))
+    }
+
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
         visitor(&self.term, false);
     }

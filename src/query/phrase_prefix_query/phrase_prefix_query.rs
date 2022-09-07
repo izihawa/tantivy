@@ -1,5 +1,7 @@
 use std::ops::Bound;
 
+use async_trait::async_trait;
+
 use super::{prefix_end, PhrasePrefixWeight};
 use crate::query::bm25::Bm25Weight;
 use crate::query::{EnableScoring, InvertedIndexRangeWeight, Query, Weight};
@@ -124,14 +126,87 @@ impl PhrasePrefixQuery {
         );
         Ok(Some(weight))
     }
+
+    #[cfg(feature = "quickwit")]
+    pub(crate) async fn phrase_prefix_query_weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Option<PhrasePrefixWeight>> {
+        if self.phrase_terms.is_empty() {
+            return Ok(None);
+        }
+        let schema = enable_scoring.schema();
+        let field_entry = schema.get_field_entry(self.field);
+        let has_positions = field_entry
+            .field_type()
+            .get_index_record_option()
+            .map(IndexRecordOption::has_positions)
+            .unwrap_or(false);
+        if !has_positions {
+            let field_name = field_entry.name();
+            return Err(crate::TantivyError::SchemaError(format!(
+                "Applied phrase query on field {:?}, which does not have positions indexed",
+                field_name
+            )));
+        }
+        let terms = self.phrase_terms();
+        let bm25_weight_opt = match enable_scoring {
+            EnableScoring::Enabled { searcher, .. } => {
+                Some(Bm25Weight::for_terms_async(searcher, &terms).await?)
+            }
+            EnableScoring::Disabled { .. } => None,
+        };
+        let weight = PhrasePrefixWeight::new(
+            self.phrase_terms.clone(),
+            self.prefix.clone(),
+            bm25_weight_opt,
+            self.max_expansions,
+        );
+        Ok(Some(weight))
+    }
 }
 
+#[async_trait]
 impl Query for PhrasePrefixQuery {
     /// Create the weight associated with a query.
     ///
     /// See [`Weight`].
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         if let Some(phrase_weight) = self.phrase_prefix_query_weight(enable_scoring)? {
+            Ok(Box::new(phrase_weight))
+        } else {
+            // There are no prefix. Let's just match the suffix.
+            let end_term =
+                if let Some(end_value) = prefix_end(self.prefix.1.serialized_value_bytes()) {
+                    let mut end_term = Term::with_capacity(end_value.len());
+                    end_term.set_field_and_type(self.field, self.prefix.1.typ());
+                    end_term.append_bytes(&end_value);
+                    Bound::Excluded(end_term)
+                } else {
+                    Bound::Unbounded
+                };
+
+            let lower_bound = Bound::Included(self.prefix.1.clone());
+            let upper_bound = end_term;
+
+            Ok(Box::new(InvertedIndexRangeWeight::new(
+                self.field,
+                &lower_bound,
+                &upper_bound,
+                Some(self.max_expansions as u64),
+            )))
+        }
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        if let Some(phrase_weight) = self
+            .phrase_prefix_query_weight_async(enable_scoring)
+            .await?
+        {
             Ok(Box::new(phrase_weight))
         } else {
             // There are no prefix. Let's just match the suffix.

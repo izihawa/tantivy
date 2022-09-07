@@ -1,9 +1,12 @@
 use std::io::Write;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::{io, thread};
 
-use common::{BinarySerializable, CountingWriter, TerminatingWrite};
+use common::{BinarySerializable, CountingWriter, HasLen, TerminatingWrite};
+use lockfree_object_pool::{LinearObjectPool, LinearOwnedReusable};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use super::DOC_STORE_VERSION;
 use crate::directory::WritePtr;
@@ -12,28 +15,36 @@ use crate::store::index::{Checkpoint, SkipIndexBuilder};
 use crate::store::{Compressor, Decompressor, StoreReader};
 use crate::DocId;
 
-pub struct BlockCompressor(BlockCompressorVariants);
+pub struct BlockCompressor {
+    compressor: Compressor,
+    variant: BlockCompressorVariants,
+}
 
 // The struct wrapping an enum is just here to keep the
 // impls private.
 enum BlockCompressorVariants {
-    SameThread(BlockCompressorImpl),
+    SameThread(BlockWriter),
     DedicatedThread(DedicatedThreadBlockCompressorImpl),
 }
 
 impl BlockCompressor {
-    pub fn new(compressor: Compressor, wrt: WritePtr, dedicated_thread: bool) -> io::Result<Self> {
-        let block_compressor_impl = BlockCompressorImpl::new(compressor, wrt);
-        if dedicated_thread {
-            let dedicated_thread_compressor =
-                DedicatedThreadBlockCompressorImpl::new(block_compressor_impl)?;
-            Ok(BlockCompressor(BlockCompressorVariants::DedicatedThread(
-                dedicated_thread_compressor,
-            )))
-        } else {
-            Ok(BlockCompressor(BlockCompressorVariants::SameThread(
+    pub fn new(compressor: Compressor, wrt: WritePtr, threads: usize) -> io::Result<Self> {
+        let block_compressor_impl = BlockWriter::new(wrt);
+        if threads >= 1 {
+            let dedicated_thread_compressor = DedicatedThreadBlockCompressorImpl::new(
+                compressor,
                 block_compressor_impl,
-            )))
+                threads,
+            )?;
+            Ok(BlockCompressor {
+                compressor,
+                variant: BlockCompressorVariants::DedicatedThread(dedicated_thread_compressor),
+            })
+        } else {
+            Ok(BlockCompressor {
+                compressor,
+                variant: BlockCompressorVariants::SameThread(block_compressor_impl),
+            })
         }
     }
 
@@ -42,22 +53,29 @@ impl BlockCompressor {
         bytes: &[u8],
         num_docs_in_block: u32,
     ) -> io::Result<()> {
-        match &mut self.0 {
-            BlockCompressorVariants::SameThread(block_compressor) => {
-                block_compressor.compress_block_and_write(bytes, num_docs_in_block)?;
+        assert!(num_docs_in_block > 0);
+        match &mut self.variant {
+            BlockCompressorVariants::SameThread(block_writer) => {
+                let mut intermediary_buffer = Vec::with_capacity(bytes.len());
+                self.compressor
+                    .compress_into(bytes, &mut intermediary_buffer)?;
+                block_writer.write_data(&intermediary_buffer, num_docs_in_block)?;
             }
             BlockCompressorVariants::DedicatedThread(different_thread_block_compressor) => {
-                different_thread_block_compressor
-                    .compress_block_and_write(bytes, num_docs_in_block)?;
+                different_thread_block_compressor.compress_block_and_write(
+                    self.compressor,
+                    bytes,
+                    num_docs_in_block,
+                )?;
             }
         }
         Ok(())
     }
 
     pub fn stack_reader(&mut self, store_reader: StoreReader) -> io::Result<()> {
-        match &mut self.0 {
-            BlockCompressorVariants::SameThread(block_compressor) => {
-                block_compressor.stack(store_reader)?;
+        match &mut self.variant {
+            BlockCompressorVariants::SameThread(block_writer) => {
+                block_writer.stack(store_reader)?;
             }
             BlockCompressorVariants::DedicatedThread(different_thread_block_compressor) => {
                 different_thread_block_compressor.stack_reader(store_reader)?;
@@ -67,9 +85,11 @@ impl BlockCompressor {
     }
 
     pub fn close(self) -> io::Result<()> {
-        let imp = self.0;
+        let imp = self.variant;
         match imp {
-            BlockCompressorVariants::SameThread(block_compressor) => block_compressor.close(),
+            BlockCompressorVariants::SameThread(block_writer) => {
+                block_writer.close(Decompressor::from(self.compressor))
+            }
             BlockCompressorVariants::DedicatedThread(different_thread_block_compressor) => {
                 different_thread_block_compressor.close()
             }
@@ -77,34 +97,34 @@ impl BlockCompressor {
     }
 }
 
-struct BlockCompressorImpl {
-    compressor: Compressor,
+struct BlockWriter {
     first_doc_in_block: DocId,
     offset_index_writer: SkipIndexBuilder,
-    intermediary_buffer: Vec<u8>,
     writer: CountingWriter<WritePtr>,
 }
 
-impl BlockCompressorImpl {
-    fn new(compressor: Compressor, writer: WritePtr) -> Self {
+impl BlockWriter {
+    fn new(writer: WritePtr) -> Self {
         Self {
-            compressor,
             first_doc_in_block: 0,
             offset_index_writer: SkipIndexBuilder::new(),
-            intermediary_buffer: Vec::new(),
             writer: CountingWriter::wrap(writer),
         }
     }
 
-    fn compress_block_and_write(&mut self, data: &[u8], num_docs_in_block: u32) -> io::Result<()> {
-        assert!(num_docs_in_block > 0);
-        self.intermediary_buffer.clear();
-        self.compressor
-            .compress_into(data, &mut self.intermediary_buffer)?;
+    fn write_block(&mut self, compressed_block: CompressedBlock) -> io::Result<()> {
+        self.write_data(
+            &compressed_block.compressed_block_data,
+            compressed_block.num_docs_in_block,
+        )
+    }
 
-        let start_offset = self.writer.written_bytes() as usize;
-        self.writer.write_all(&self.intermediary_buffer)?;
-        let end_offset = self.writer.written_bytes() as usize;
+    fn write_data(&mut self, compressed_block: &[u8], num_docs_in_block: u32) -> io::Result<()> {
+        assert!(num_docs_in_block > 0);
+
+        let start_offset = self.writer.written_bytes();
+        self.writer.write_all(compressed_block)?;
+        let end_offset = self.writer.written_bytes();
 
         self.register_checkpoint(Checkpoint {
             doc_range: self.first_doc_in_block..self.first_doc_in_block + num_docs_in_block,
@@ -124,7 +144,7 @@ impl BlockCompressorImpl {
     /// not be decompressed and then recompressed.
     fn stack(&mut self, store_reader: StoreReader) -> io::Result<()> {
         let doc_shift = self.first_doc_in_block;
-        let start_shift = self.writer.written_bytes() as usize;
+        let start_shift = self.writer.written_bytes();
 
         // just bulk write all of the block of the given reader.
         self.writer
@@ -142,70 +162,126 @@ impl BlockCompressorImpl {
         Ok(())
     }
 
-    fn close(mut self) -> io::Result<()> {
+    fn close(mut self, decompressor: Decompressor) -> io::Result<()> {
         let header_offset: u64 = self.writer.written_bytes();
-        let docstore_footer = DocStoreFooter::new(
-            header_offset,
-            Decompressor::from(self.compressor),
-            DOC_STORE_VERSION,
-        );
+        let docstore_footer = DocStoreFooter::new(header_offset, decompressor, DOC_STORE_VERSION);
         self.offset_index_writer.serialize_into(&mut self.writer)?;
         docstore_footer.serialize(&mut self.writer)?;
         self.writer.terminate()
     }
 }
 
+struct CompressionPool {
+    thread_pool: ThreadPool,
+    memory_pool: Arc<LinearObjectPool<Vec<u8>>>,
+}
+
+impl CompressionPool {
+    pub fn new(threads: usize) -> Self {
+        CompressionPool {
+            thread_pool: ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap(),
+            memory_pool: Arc::new(LinearObjectPool::new(|| vec![], |x| x.clear())),
+        }
+    }
+
+    pub fn compress(
+        &self,
+        compressor: Compressor,
+        block_data: &[u8],
+        num_docs_in_block: u32,
+    ) -> oneshot::Receiver<CompressedBlock> {
+        let (sender, receiver) = oneshot::channel();
+        let mut intermediary_buffer = self.memory_pool.pull_owned();
+        let block_data = block_data.to_vec();
+        self.thread_pool.spawn(move || {
+            compressor
+                .compress_into(&block_data, &mut intermediary_buffer)
+                .unwrap();
+            sender
+                .send(CompressedBlock::new(intermediary_buffer, num_docs_in_block))
+                .unwrap();
+        });
+        receiver
+    }
+}
+
+struct CompressedBlock {
+    compressed_block_data: LinearOwnedReusable<Vec<u8>>,
+    num_docs_in_block: u32,
+}
+
+impl CompressedBlock {
+    pub fn new(
+        compressed_block_data: LinearOwnedReusable<Vec<u8>>,
+        num_docs_in_block: u32,
+    ) -> Self {
+        CompressedBlock {
+            compressed_block_data,
+            num_docs_in_block,
+        }
+    }
+}
+
 // ---------------------------------
 enum BlockCompressorMessage {
-    CompressBlockAndWrite {
-        block_data: Vec<u8>,
-        num_docs_in_block: u32,
-    },
+    CompressionHandler(oneshot::Receiver<CompressedBlock>),
     Stack(StoreReader),
 }
 
 struct DedicatedThreadBlockCompressorImpl {
     join_handle: Option<JoinHandle<io::Result<()>>>,
     tx: SyncSender<BlockCompressorMessage>,
+    compression_pool: CompressionPool,
 }
 
 impl DedicatedThreadBlockCompressorImpl {
-    fn new(mut block_compressor: BlockCompressorImpl) -> io::Result<Self> {
+    fn new(
+        compressor: Compressor,
+        mut block_writer: BlockWriter,
+        threads: usize,
+    ) -> io::Result<Self> {
         let (tx, rx): (
             SyncSender<BlockCompressorMessage>,
             Receiver<BlockCompressorMessage>,
-        ) = sync_channel(3);
+        ) = sync_channel(threads);
         let join_handle = thread::Builder::new()
             .name("docstore-compressor-thread".to_string())
             .spawn(move || {
                 while let Ok(packet) = rx.recv() {
                     match packet {
-                        BlockCompressorMessage::CompressBlockAndWrite {
-                            block_data,
-                            num_docs_in_block,
-                        } => {
-                            block_compressor
-                                .compress_block_and_write(&block_data[..], num_docs_in_block)?;
+                        BlockCompressorMessage::CompressionHandler(compression_handler) => {
+                            block_writer.write_block(compression_handler.recv().unwrap())?;
                         }
                         BlockCompressorMessage::Stack(store_reader) => {
-                            block_compressor.stack(store_reader)?;
+                            block_writer.stack(store_reader)?;
                         }
                     }
                 }
-                block_compressor.close()?;
+                block_writer.close(Decompressor::from(compressor))?;
                 Ok(())
             })?;
         Ok(DedicatedThreadBlockCompressorImpl {
             join_handle: Some(join_handle),
             tx,
+            compression_pool: CompressionPool::new(threads),
         })
     }
 
-    fn compress_block_and_write(&mut self, bytes: &[u8], num_docs_in_block: u32) -> io::Result<()> {
-        self.send(BlockCompressorMessage::CompressBlockAndWrite {
-            block_data: bytes.to_vec(),
-            num_docs_in_block,
-        })
+    fn compress_block_and_write(
+        &mut self,
+        compressor: Compressor,
+        bytes: &[u8],
+        num_docs_in_block: u32,
+    ) -> io::Result<()> {
+        let compression_handler =
+            self.compression_pool
+                .compress(compressor, bytes, num_docs_in_block);
+        self.send(BlockCompressorMessage::CompressionHandler(
+            compression_handler,
+        ))
     }
 
     fn stack_reader(&mut self, store_reader: StoreReader) -> io::Result<()> {
@@ -262,8 +338,8 @@ mod tests {
         let path2 = Path::new("path2");
         let wrt1 = ram_directory.open_write(path1).unwrap();
         let wrt2 = ram_directory.open_write(path2).unwrap();
-        let block_compressor1 = BlockCompressor::new(Compressor::None, wrt1, true).unwrap();
-        let block_compressor2 = BlockCompressor::new(Compressor::None, wrt2, false).unwrap();
+        let block_compressor1 = BlockCompressor::new(Compressor::None, wrt1, 1).unwrap();
+        let block_compressor2 = BlockCompressor::new(Compressor::None, wrt2, 0).unwrap();
         populate_block_compressor(block_compressor1).unwrap();
         populate_block_compressor(block_compressor2).unwrap();
         let data1 = ram_directory.open_read(path1).unwrap();

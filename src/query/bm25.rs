@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::fieldnorm::FieldNormReader;
@@ -12,24 +13,41 @@ const B: Score = 0.75;
 ///
 /// The standard implementation is a [Searcher] but you can also
 /// create your own to adjust the statistics.
-pub trait Bm25StatisticsProvider {
+#[async_trait]
+pub trait Bm25StatisticsProvider: Send + Sync {
     /// The total number of tokens in a given field across all documents in
     /// the index.
     fn total_num_tokens(&self, field: Field) -> crate::Result<u64>;
+    #[cfg(feature = "quickwit")]
+    async fn total_num_tokens_async(&self, field: Field) -> crate::Result<u64>;
 
     /// The total number of documents in the index.
     fn total_num_docs(&self) -> crate::Result<u64>;
 
     /// The number of documents containing the given term.
     fn doc_freq(&self, term: &Term) -> crate::Result<u64>;
+
+    async fn doc_freq_async(&self, term: &Term) -> crate::Result<u64>;
 }
 
+#[async_trait]
 impl Bm25StatisticsProvider for Searcher {
     fn total_num_tokens(&self, field: Field) -> crate::Result<u64> {
         let mut total_num_tokens = 0u64;
 
         for segment_reader in self.segment_readers() {
             let inverted_index = segment_reader.inverted_index(field)?;
+            total_num_tokens += inverted_index.total_num_tokens();
+        }
+        Ok(total_num_tokens)
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn total_num_tokens_async(&self, field: Field) -> crate::Result<u64> {
+        let mut total_num_tokens = 0u64;
+
+        for segment_reader in self.segment_readers() {
+            let inverted_index = segment_reader.inverted_index_async(field).await?;
             total_num_tokens += inverted_index.total_num_tokens();
         }
         Ok(total_num_tokens)
@@ -46,6 +64,10 @@ impl Bm25StatisticsProvider for Searcher {
 
     fn doc_freq(&self, term: &Term) -> crate::Result<u64> {
         self.doc_freq(term)
+    }
+
+    async fn doc_freq_async(&self, term: &Term) -> crate::Result<u64> {
+        self.doc_freq_async(term).await
     }
 }
 
@@ -124,6 +146,43 @@ impl Bm25Weight {
             let mut idf_sum: Score = 0.0;
             for term in terms {
                 let term_doc_freq = statistics.doc_freq(term)?;
+                idf_sum += idf(term_doc_freq, total_num_docs);
+            }
+            let idf_explain = Explanation::new("idf", idf_sum);
+            Ok(Bm25Weight::new(idf_explain, average_fieldnorm))
+        }
+    }
+
+    #[cfg(feature = "quickwit")]
+    pub async fn for_terms_async(
+        statistics: &dyn Bm25StatisticsProvider,
+        terms: &[Term],
+    ) -> crate::Result<Bm25Weight> {
+        assert!(!terms.is_empty(), "Bm25 requires at least one term");
+        let field = terms[0].field();
+        for term in &terms[1..] {
+            assert_eq!(
+                term.field(),
+                field,
+                "All terms must belong to the same field."
+            );
+        }
+
+        let total_num_tokens = statistics.total_num_tokens_async(field).await?;
+        let total_num_docs = statistics.total_num_docs()?;
+        let average_fieldnorm = total_num_tokens as Score / total_num_docs as Score;
+
+        if terms.len() == 1 {
+            let term_doc_freq = statistics.doc_freq_async(&terms[0]).await?;
+            Ok(Bm25Weight::for_one_term(
+                term_doc_freq,
+                total_num_docs,
+                average_fieldnorm,
+            ))
+        } else {
+            let mut idf_sum: Score = 0.0;
+            for term in terms {
+                let term_doc_freq = statistics.doc_freq_async(term).await?;
                 idf_sum += idf(term_doc_freq, total_num_docs);
             }
             let idf_explain = Explanation::new("idf", idf_sum);

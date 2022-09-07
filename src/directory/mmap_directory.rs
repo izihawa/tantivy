@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -6,6 +7,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 
+use async_trait::async_trait;
 use common::StableDeref;
 use fs4::FileExt;
 #[cfg(all(feature = "mmap", unix))]
@@ -367,6 +369,7 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+#[async_trait]
 impl Directory for MmapDirectory {
     fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
         debug!("Open Read {:?}", path);
@@ -394,6 +397,22 @@ impl Directory for MmapDirectory {
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
         let full_path = self.resolve_path(path);
         fs::remove_file(full_path).map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                DeleteError::FileDoesNotExist(path.to_owned())
+            } else {
+                DeleteError::IoError {
+                    io_error: Arc::new(e),
+                    filepath: path.to_path_buf(),
+                }
+            }
+        })?;
+        Ok(())
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn delete_async(&self, path: &Path) -> Result<(), DeleteError> {
+        let full_path = self.resolve_path(path);
+        tokio::fs::remove_file(full_path).await.map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
                 DeleteError::FileDoesNotExist(path.to_owned())
             } else {
@@ -466,9 +485,33 @@ impl Directory for MmapDirectory {
         }
     }
 
+    #[cfg(feature = "quickwit")]
+    async fn atomic_read_async(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        use tokio::io::AsyncReadExt;
+        let full_path = self.resolve_path(path);
+        let mut buffer = Vec::new();
+        match tokio::fs::File::open(full_path).await {
+            Ok(mut file) => {
+                file.read_to_end(&mut buffer).await.map_err(|io_error| {
+                    OpenReadError::wrap_io_error(io_error, path.to_path_buf())
+                })?;
+                Ok(buffer)
+            }
+            Err(io_error) => {
+                if io_error.kind() == io::ErrorKind::NotFound {
+                    Err(OpenReadError::FileDoesNotExist(path.to_owned()))
+                } else {
+                    Err(OpenReadError::wrap_io_error(io_error, path.to_path_buf()))
+                }
+            }
+        }
+    }
+
     fn atomic_write(&self, path: &Path, content: &[u8]) -> io::Result<()> {
         debug!("Atomic Write {:?}", path);
         let full_path = self.resolve_path(path);
+        let mut lock = self.inner.mmap_cache.write().unwrap();
+        lock.cache.remove(&full_path);
         atomic_write(&full_path, content)?;
         Ok(())
     }
@@ -518,6 +561,13 @@ impl Directory for MmapDirectory {
         let fd = open_opts.open(&self.inner.root_path)?;
         fd.sync_data()?;
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn real_directory(&self) -> &dyn Directory {
+        self
     }
 }
 
@@ -649,7 +699,7 @@ mod tests {
             let mut index_writer: IndexWriter = index.writer_for_tests().unwrap();
             let mut log_merge_policy = LogMergePolicy::default();
             log_merge_policy.set_min_num_segments(3);
-            index_writer.set_merge_policy(Box::new(log_merge_policy));
+            index_writer.set_merge_policy(Arc::new(log_merge_policy));
             for _num_commits in 0..10 {
                 for _ in 0..10 {
                     index_writer.add_document(doc!(text_field=>"abc")).unwrap();

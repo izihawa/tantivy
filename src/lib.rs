@@ -370,6 +370,8 @@ macro_rules! fail_point {
 /// Common test utilities.
 #[cfg(test)]
 pub mod tests {
+    use std::sync::Arc;
+
     use common::{BinarySerializable, FixedSize};
     use query_grammar::{UserInputAst, UserInputLeaf, UserInputLiteral};
     use rand::distributions::{Bernoulli, Uniform};
@@ -1122,8 +1124,8 @@ pub mod tests {
         let index = Index::create_in_ram(schema);
         let index_reader = index.reader()?;
 
-        let mut index_writer: IndexWriter = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        let mut index_writer = index.writer_for_tests()?;
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
         for doc_id in 0u64..DOC_COUNT {
             index_writer.add_document(doc!(id => doc_id))?;
@@ -1175,8 +1177,8 @@ pub mod tests {
         let body = builder.add_text_field("body", TEXT | STORED);
         let schema = builder.build();
         let index = Index::create_in_dir(&index_path, schema)?;
-        let mut writer: IndexWriter = index.writer(50_000_000)?;
-        writer.set_merge_policy(Box::new(NoMergePolicy));
+        let mut writer = index.writer(50_000_000)?;
+        writer.set_merge_policy(Arc::new(NoMergePolicy));
         for _ in 0..5000 {
             writer.add_document(doc!(body => "foo"))?;
             writer.add_document(doc!(body => "boo"))?;

@@ -184,7 +184,7 @@ impl VInt {
                 *b = next_byte;
             }
         }
-        unreachable!();
+        unreachable!("VInt::serialize_into");
     }
 }
 

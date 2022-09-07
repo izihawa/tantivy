@@ -188,6 +188,7 @@ impl InnerIndexReader {
             searcher_generation_inventory,
         })
     }
+
     /// Opens the freshest segments [`SegmentReader`].
     ///
     /// This function acquires a lock to prevent GC from removing files
@@ -257,6 +258,21 @@ impl InnerIndexReader {
 
     fn searcher(&self) -> Searcher {
         self.searcher.load().clone().into()
+    }
+}
+
+#[cfg(feature = "quickwit")]
+impl InnerIndexReader {
+    async fn open_segment_readers_async(index: &Index) -> crate::Result<Vec<SegmentReader>> {
+        // Prevents segment files from getting deleted while we are in the process of opening them
+        let _meta_lock = index.directory().acquire_lock(&META_LOCK)?;
+        let searchable_segments = index.searchable_segments_async().await?;
+        let segment_readers =
+            futures::future::join_all(searchable_segments.iter().map(SegmentReader::open_async))
+                .await
+                .into_iter()
+                .collect::<crate::Result<_>>()?;
+        Ok(segment_readers)
     }
 }
 

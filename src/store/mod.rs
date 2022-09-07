@@ -80,7 +80,7 @@ pub(crate) mod tests {
         num_docs: usize,
         compressor: Compressor,
         blocksize: usize,
-        separate_thread: bool,
+        threads: usize,
     ) -> Schema {
         let mut schema_builder = Schema::builder();
         let field_body = schema_builder.add_text_field("body", TextOptions::default().set_stored());
@@ -89,7 +89,7 @@ pub(crate) mod tests {
         let schema = schema_builder.build();
         {
             let mut store_writer =
-                StoreWriter::new(writer, compressor, blocksize, separate_thread).unwrap();
+                StoreWriter::new(writer, compressor, blocksize, threads).unwrap();
             for i in 0..num_docs {
                 let mut doc = TantivyDocument::default();
                 doc.add_text(field_body, LOREM);
@@ -112,8 +112,7 @@ pub(crate) mod tests {
         let path = Path::new("store");
         let directory = RamDirectory::create();
         let store_wrt = directory.open_write(path)?;
-        let schema =
-            write_lorem_ipsum_store(store_wrt, NUM_DOCS, Compressor::Lz4, BLOCK_SIZE, true);
+        let schema = write_lorem_ipsum_store(store_wrt, NUM_DOCS, Compressor::Lz4, BLOCK_SIZE, 1);
         let field_title = schema.get_field("title").unwrap();
         let store_file = directory.open_read(path)?;
         let store = StoreReader::open(store_file, 10)?;
@@ -156,16 +155,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    fn test_store(
-        compressor: Compressor,
-        blocksize: usize,
-        separate_thread: bool,
-    ) -> crate::Result<()> {
+    fn test_store(compressor: Compressor, blocksize: usize, threads: usize) -> crate::Result<()> {
         let path = Path::new("store");
         let directory = RamDirectory::create();
         let store_wrt = directory.open_write(path)?;
-        let schema =
-            write_lorem_ipsum_store(store_wrt, NUM_DOCS, compressor, blocksize, separate_thread);
+        let schema = write_lorem_ipsum_store(store_wrt, NUM_DOCS, compressor, blocksize, threads);
         let field_title = schema.get_field("title").unwrap();
         let store_file = directory.open_read(path)?;
         let store = StoreReader::open(store_file, 10)?;
@@ -191,28 +185,24 @@ pub(crate) mod tests {
 
     #[test]
     fn test_store_no_compression_same_thread() -> crate::Result<()> {
-        test_store(Compressor::None, BLOCK_SIZE, false)
+        test_store(Compressor::None, BLOCK_SIZE, 0)
     }
 
     #[test]
     fn test_store_no_compression() -> crate::Result<()> {
-        test_store(Compressor::None, BLOCK_SIZE, true)
+        test_store(Compressor::None, BLOCK_SIZE, 1)
     }
 
     #[cfg(feature = "lz4-compression")]
     #[test]
     fn test_store_lz4_block() -> crate::Result<()> {
-        test_store(Compressor::Lz4, BLOCK_SIZE, true)
+        test_store(Compressor::Lz4, BLOCK_SIZE, 1)
     }
 
     #[cfg(feature = "zstd-compression")]
     #[test]
     fn test_store_zstd() -> crate::Result<()> {
-        test_store(
-            Compressor::Zstd(ZstdCompressor::default()),
-            BLOCK_SIZE,
-            true,
-        )
+        test_store(Compressor::Zstd(ZstdCompressor::default()), BLOCK_SIZE, 1)
     }
 
     #[test]
@@ -344,7 +334,7 @@ pub(crate) mod tests {
         // Merging the segments
         {
             let segment_ids = index.searchable_segment_ids()?;
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.merge(&segment_ids).wait()?;
             index_writer.wait_merging_threads()?;
         }
@@ -381,7 +371,7 @@ mod bench {
                 1_000,
                 Compressor::default(),
                 16_384,
-                true,
+                1,
             );
             directory.delete(path).unwrap();
         });
@@ -396,7 +386,7 @@ mod bench {
             1_000,
             Compressor::default(),
             16_384,
-            true,
+            1,
         );
         let store_file = directory.open_read(path).unwrap();
         let store = StoreReader::open(store_file, 10).unwrap();

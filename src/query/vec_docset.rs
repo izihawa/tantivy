@@ -38,14 +38,14 @@ impl DocSet for VecDocSet {
         self.doc_ids[self.cursor]
     }
 
-    fn size_hint(&self) -> u32 {
-        self.len() as u32
+    fn size_hint(&self) -> u64 {
+        self.len()
     }
 }
 
 impl HasLen for VecDocSet {
-    fn len(&self) -> usize {
-        self.doc_ids.len()
+    fn len(&self) -> u64 {
+        self.doc_ids.len() as u64
     }
 }
 

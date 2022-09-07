@@ -67,7 +67,7 @@ impl<T: Scorer> DocSet for ScorerWrapper<T> {
         self.current_doc
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.scorer.size_hint()
     }
 }
@@ -139,12 +139,12 @@ impl<TScorer: Scorer, TScoreCombiner: ScoreCombiner> DocSet
         self.current_doc
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.chains
             .iter()
             .map(|docset| docset.size_hint())
             .max()
-            .unwrap_or(0u32)
+            .unwrap_or(0)
     }
 }
 
@@ -279,8 +279,8 @@ mod tests {
             self.foo.get(self.cursor).map(|x| x.0).unwrap_or(TERMINATED)
         }
 
-        fn size_hint(&self) -> u32 {
-            self.foo.len() as u32
+        fn size_hint(&self) -> u64 {
+            self.foo.len() as u64
         }
     }
 

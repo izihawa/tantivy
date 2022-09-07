@@ -16,7 +16,7 @@ use crate::schema::{Field, IndexRecordOption, Schema, Type};
 use crate::space_usage::SegmentSpaceUsage;
 use crate::store::StoreReader;
 use crate::termdict::TermDictionary;
-use crate::{DocId, Opstamp};
+use crate::{DocId, Opstamp, TantivyError};
 
 /// Entry point to access all of the datastructures of the `Segment`
 ///
@@ -489,6 +489,172 @@ pub fn merge_field_meta_data(
         merged_field_metadata.push(merged);
     }
     merged_field_metadata
+}
+
+#[cfg(feature = "quickwit")]
+impl SegmentReader {
+    pub async fn inverted_index_async(
+        &self,
+        field: Field,
+    ) -> crate::Result<Arc<InvertedIndexReader>> {
+        if let Some(inv_idx_reader) = self
+            .inv_idx_reader_cache
+            .read()
+            .expect("Lock poisoned. This should never happen")
+            .get(&field)
+        {
+            return Ok(Arc::clone(inv_idx_reader));
+        }
+        let field_entry = self.schema.get_field_entry(field);
+        let field_type = field_entry.field_type();
+        let record_option_opt = field_type.get_index_record_option();
+
+        if record_option_opt.is_none() {
+            warn!("Field {:?} does not seem indexed.", field_entry.name());
+        }
+
+        let postings_file_opt = self.postings_composite.open_read(field);
+
+        if postings_file_opt.is_none() || record_option_opt.is_none() {
+            // no documents in the segment contained this field.
+            // As a result, no data is associated with the inverted index.
+            //
+            // Returns an empty inverted index.
+            let record_option = record_option_opt.unwrap_or(IndexRecordOption::Basic);
+            return Ok(Arc::new(InvertedIndexReader::empty(record_option)));
+        }
+
+        let record_option = record_option_opt.unwrap();
+        let postings_file = postings_file_opt.unwrap();
+
+        let termdict_file: FileSlice =
+            self.termdict_composite.open_read(field).ok_or_else(|| {
+                DataCorruption::comment_only(format!(
+                    "Failed to open field {:?}'s term dictionary in the composite file. Has the \
+                     schema been modified?",
+                    field_entry.name()
+                ))
+            })?;
+
+        let positions_file = self.positions_composite.open_read(field).ok_or_else(|| {
+            let error_msg = format!(
+                "Failed to open field {:?}'s positions in the composite file. Has the schema been \
+                 modified?",
+                field_entry.name()
+            );
+            DataCorruption::comment_only(error_msg)
+        })?;
+
+        let inv_idx_reader = Arc::new(
+            InvertedIndexReader::new_async(
+                TermDictionary::open_async(termdict_file).await?,
+                postings_file,
+                positions_file,
+                record_option,
+            )
+            .await?,
+        );
+
+        // by releasing the lock in between, we may end up opening the inverting index
+        // twice, but this is fine.
+        self.inv_idx_reader_cache
+            .write()
+            .expect("Field reader cache lock poisoned. This should never happen.")
+            .insert(field, Arc::clone(&inv_idx_reader));
+
+        Ok(inv_idx_reader)
+    }
+
+    pub async fn get_store_reader_async(&self, cache_num_blocks: usize) -> io::Result<StoreReader> {
+        StoreReader::open_async(self.store_file.clone(), cache_num_blocks).await
+    }
+
+    /// Open a new segment for reading.
+    pub async fn open_async(segment: &Segment) -> crate::Result<SegmentReader> {
+        Self::open_with_custom_alive_set_async(segment, None).await
+    }
+
+    /// Open a new segment for reading.
+    pub async fn open_with_custom_alive_set_async(
+        segment: &Segment,
+        custom_bitset: Option<AliveBitSet>,
+    ) -> crate::Result<SegmentReader> {
+        let (
+            termdict_composite,
+            store_file,
+            postings_composite,
+            positions_composite,
+            fast_fields_readers,
+            fieldnorm_readers,
+            original_bitset,
+        ) = futures::join!(
+            async move {
+                let termdict_file = segment.open_read_async(SegmentComponent::Terms).await?;
+                Ok::<_, TantivyError>(CompositeFile::open_async(&termdict_file).await?)
+            },
+            segment.open_read_async(SegmentComponent::Store),
+            async move {
+                let postings_file = segment.open_read_async(SegmentComponent::Postings).await?;
+                Ok::<_, TantivyError>(CompositeFile::open_async(&postings_file).await?)
+            },
+            async move {
+                if let Ok(positions_file) =
+                    segment.open_read_async(SegmentComponent::Positions).await
+                {
+                    Ok(CompositeFile::open_async(&positions_file).await?)
+                } else {
+                    Ok::<_, TantivyError>(CompositeFile::empty())
+                }
+            },
+            async move {
+                let fast_fields_data = segment
+                    .open_read_async(SegmentComponent::FastFields)
+                    .await?;
+                Ok::<_, TantivyError>(
+                    FastFieldReaders::open_async(fast_fields_data, segment.schema().clone())
+                        .await?,
+                )
+            },
+            async move {
+                let fieldnorm_data = segment
+                    .open_read_async(SegmentComponent::FieldNorms)
+                    .await?;
+                Ok::<_, TantivyError>(FieldNormReaders::open_async(fieldnorm_data).await?)
+            },
+            async move {
+                if segment.meta().has_deletes() {
+                    let alive_doc_file_slice =
+                        segment.open_read_async(SegmentComponent::Delete).await?;
+                    let alive_doc_data = alive_doc_file_slice.read_bytes_async().await?;
+                    Ok::<_, TantivyError>(Some(AliveBitSet::open(alive_doc_data)))
+                } else {
+                    Ok(None)
+                }
+            }
+        );
+        let alive_bitset_opt = intersect_alive_bitset(original_bitset?, custom_bitset);
+        let max_doc = segment.meta().max_doc();
+        let num_docs = alive_bitset_opt
+            .as_ref()
+            .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
+            .unwrap_or(max_doc);
+
+        Ok(SegmentReader {
+            inv_idx_reader_cache: Default::default(),
+            num_docs,
+            max_doc,
+            termdict_composite: termdict_composite?,
+            postings_composite: postings_composite?,
+            fast_fields_readers: fast_fields_readers?,
+            fieldnorm_readers: fieldnorm_readers?,
+            segment_id: segment.id(),
+            delete_opstamp: segment.meta().delete_opstamp(),
+            store_file: store_file?,
+            alive_bitset_opt,
+            positions_composite: positions_composite?,
+            schema: segment.schema(),
+        })
+    }
 }
 
 fn intersect_alive_bitset(

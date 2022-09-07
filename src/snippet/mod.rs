@@ -220,6 +220,10 @@ fn search_fragments(
         }
         fragment.try_add_token(next, terms);
     }
+    // Add trailing punctuation
+    if text.len() - fragment.start_offset < max_num_chars {
+        fragment.stop_offset = text.len();
+    }
     if fragment.score > 0.0 {
         fragments.push(fragment)
     }
@@ -374,6 +378,7 @@ fn is_sorted(mut it: impl Iterator<Item = usize>) -> bool {
 /// #    Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct SnippetGenerator {
     terms_text: BTreeMap<String, Score>,
     tokenizer: TextAnalyzer,
@@ -417,6 +422,41 @@ impl SnippetGenerator {
                 continue;
             };
             let doc_freq = searcher.doc_freq(term)?;
+            if doc_freq > 0 {
+                let score = 1.0 / (1.0 + doc_freq as Score);
+                terms_text.insert(term_str.to_string(), score);
+            }
+        }
+        let tokenizer = searcher.index().tokenizer_for_field(field)?;
+        Ok(SnippetGenerator {
+            terms_text,
+            tokenizer,
+            field,
+            max_num_chars: DEFAULT_MAX_NUM_CHARS,
+        })
+    }
+    /// Creates a new snippet generator in async manner
+    #[cfg(feature = "quickwit")]
+    pub async fn create_async(
+        searcher: &Searcher,
+        query: &dyn Query,
+        field: Field,
+    ) -> crate::Result<SnippetGenerator> {
+        let mut terms: BTreeSet<&Term> = BTreeSet::new();
+        query.query_terms(&mut |term, _| {
+            if term.field() == field {
+                terms.insert(term);
+            }
+        });
+        let mut terms_text: BTreeMap<String, Score> = Default::default();
+        for term in terms {
+            let term_value = term.value();
+            let term_str = if let Some(term_str) = term_value.as_str() {
+                term_str
+            } else {
+                continue;
+            };
+            let doc_freq = searcher.doc_freq_async(term).await?;
             if doc_freq > 0 {
                 let score = 1.0 / (1.0 + doc_freq as Score);
                 terms_text.insert(term_str.to_string(), score);

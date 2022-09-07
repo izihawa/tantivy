@@ -88,3 +88,14 @@ impl Segment {
         Ok(write)
     }
 }
+
+#[cfg(feature = "quickwit")]
+impl Segment {
+    pub async fn open_read_async(
+        &self,
+        component: SegmentComponent,
+    ) -> Result<FileSlice, OpenReadError> {
+        let path = self.relative_path(component);
+        self.index.directory().open_read_async(&path).await
+    }
+}

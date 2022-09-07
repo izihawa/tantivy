@@ -13,6 +13,7 @@ use crate::query::{
     RequiredOptionalScorer, Scorer, Weight,
 };
 use crate::{DocId, Score};
+use async_trait::async_trait;
 
 enum SpecializedScorer {
     TermUnion(Vec<TermScorer>),
@@ -247,6 +248,87 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
     }
 }
 
+#[cfg(feature = "quickwit")]
+impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
+    async fn complex_scorer_async<TComplexScoreCombiner: ScoreCombiner>(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+        score_combiner_fn: impl Fn() -> TComplexScoreCombiner,
+    ) -> crate::Result<SpecializedScorer> {
+        let mut per_occur_scorers = self.per_occur_scorers_async(reader, boost).await?;
+
+        let should_scorer_opt: Option<SpecializedScorer> = per_occur_scorers
+            .remove(&Occur::Should)
+            .map(|scorers| scorer_union(scorers, &score_combiner_fn));
+        let exclude_scorer_opt: Option<Box<dyn Scorer>> = per_occur_scorers
+            .remove(&Occur::MustNot)
+            .map(|scorers| scorer_union(scorers, DoNothingCombiner::default))
+            .map(|specialized_scorer| {
+                into_box_scorer(specialized_scorer, DoNothingCombiner::default)
+            });
+
+        let must_scorer_opt: Option<Box<dyn Scorer>> = per_occur_scorers
+            .remove(&Occur::Must)
+            .map(intersect_scorers);
+
+        let positive_scorer: SpecializedScorer = match (should_scorer_opt, must_scorer_opt) {
+            (Some(should_scorer), Some(must_scorer)) => {
+                if self.scoring_enabled {
+                    SpecializedScorer::Other(Box::new(RequiredOptionalScorer::<
+                        Box<dyn Scorer>,
+                        Box<dyn Scorer>,
+                        TComplexScoreCombiner,
+                    >::new(
+                        must_scorer,
+                        into_box_scorer(should_scorer, &score_combiner_fn),
+                    )))
+                } else {
+                    SpecializedScorer::Other(must_scorer)
+                }
+            }
+            (None, Some(must_scorer)) => SpecializedScorer::Other(must_scorer),
+            (Some(should_scorer), None) => should_scorer,
+            (None, None) => {
+                return Ok(SpecializedScorer::Other(Box::new(EmptyScorer)));
+            }
+        };
+
+        if let Some(exclude_scorer) = exclude_scorer_opt {
+            let positive_scorer_boxed = into_box_scorer(positive_scorer, &score_combiner_fn);
+            Ok(SpecializedScorer::Other(Box::new(Exclude::new(
+                positive_scorer_boxed,
+                exclude_scorer,
+            ))))
+        } else {
+            Ok(positive_scorer)
+        }
+    }
+
+    async fn per_occur_scorers_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<HashMap<Occur, Vec<Box<dyn Scorer>>>> {
+        let mut per_occur_scorers: HashMap<Occur, Vec<Box<dyn Scorer>>> = HashMap::new();
+        let sub_scorers = self
+            .weights
+            .iter()
+            .map(|&(ref occur, ref subweight)| async move {
+                Ok::<_, crate::TantivyError>((occur, subweight.scorer_async(reader, boost).await?))
+            });
+        for sub_scorer in futures::future::join_all(sub_scorers).await.into_iter() {
+            let (occur, sub_scorer) = sub_scorer?;
+            per_occur_scorers
+                .entry(*occur)
+                .or_insert_with(Vec::new)
+                .push(sub_scorer as Box<dyn Scorer>);
+        }
+        Ok(per_occur_scorers)
+    }
+}
+
+#[async_trait]
 impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombiner> {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         if self.weights.is_empty() {
@@ -317,7 +399,6 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
     ) -> crate::Result<()> {
         let scorer = self.complex_scorer(reader, 1.0, || DoNothingCombiner)?;
         let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
-
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 let mut union_scorer =
@@ -348,6 +429,102 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         callback: &mut dyn FnMut(DocId, Score) -> Score,
     ) -> crate::Result<()> {
         let scorer = self.complex_scorer(reader, 1.0, &self.score_combiner_fn)?;
+        match scorer {
+            SpecializedScorer::TermUnion(term_scorers) => {
+                super::block_wand(term_scorers, threshold, callback);
+            }
+            SpecializedScorer::Other(mut scorer) => {
+                for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        if self.weights.is_empty() {
+            Ok(Box::new(EmptyScorer))
+        } else if self.weights.len() == 1 {
+            let &(occur, ref weight) = &self.weights[0];
+            if occur == Occur::MustNot {
+                Ok(Box::new(EmptyScorer))
+            } else {
+                weight.scorer_async(reader, boost).await
+            }
+        } else if self.scoring_enabled {
+            self.complex_scorer_async(reader, boost, &self.score_combiner_fn)
+                .await
+                .map(|specialized_scorer| {
+                    into_box_scorer(specialized_scorer, &self.score_combiner_fn)
+                })
+        } else {
+            self.complex_scorer_async(reader, boost, DoNothingCombiner::default)
+                .await
+                .map(|specialized_scorer| {
+                    into_box_scorer(specialized_scorer, DoNothingCombiner::default)
+                })
+        }
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_each_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) + Send),
+    ) -> crate::Result<()> {
+        let scorer = self
+            .complex_scorer_async(reader, 1.0, &self.score_combiner_fn)
+            .await?;
+        match scorer {
+            SpecializedScorer::TermUnion(term_scorers) => {
+                let mut union_scorer =
+                    BufferedUnionScorer::build(term_scorers, &self.score_combiner_fn);
+                for_each_scorer(&mut union_scorer, callback);
+            }
+            SpecializedScorer::Other(mut scorer) => {
+                for_each_scorer(scorer.as_mut(), callback);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_each_no_score_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn for<'a> FnMut(&'a [DocId]) + Send),
+    ) -> crate::Result<()> {
+        let scorer = self
+            .complex_scorer_async(reader, 1.0, || DoNothingCombiner)
+            .await?;
+        let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
+        match scorer {
+            SpecializedScorer::TermUnion(term_scorers) => {
+                let mut union_scorer =
+                    BufferedUnionScorer::build(term_scorers, &self.score_combiner_fn);
+                for_each_docset_buffered(&mut union_scorer, &mut buffer, callback);
+            }
+            SpecializedScorer::Other(mut scorer) => {
+                for_each_docset_buffered(scorer.as_mut(), &mut buffer, callback);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_each_pruning_async(
+        &self,
+        threshold: Score,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) -> Score + Send),
+    ) -> crate::Result<()> {
+        let scorer = self
+            .complex_scorer_async(reader, 1.0, &self.score_combiner_fn)
+            .await?;
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);

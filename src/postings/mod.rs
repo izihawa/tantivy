@@ -521,7 +521,7 @@ pub(crate) mod tests {
             self.0.doc()
         }
 
-        fn size_hint(&self) -> u32 {
+        fn size_hint(&self) -> u64 {
             self.0.size_hint()
         }
     }

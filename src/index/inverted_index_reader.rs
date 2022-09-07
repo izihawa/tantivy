@@ -221,50 +221,26 @@ impl InvertedIndexReader {
 
 #[cfg(feature = "quickwit")]
 impl InvertedIndexReader {
-    pub(crate) async fn get_term_info_async(&self, term: &Term) -> io::Result<Option<TermInfo>> {
-        self.termdict.get_async(term.serialized_value_bytes()).await
+    pub async fn new_async(
+        termdict: TermDictionary,
+        postings_file_slice: FileSlice,
+        positions_file_slice: FileSlice,
+        record_option: IndexRecordOption,
+    ) -> io::Result<InvertedIndexReader> {
+        let (total_num_tokens_slice, postings_body) = postings_file_slice.split(8);
+        let total_num_tokens =
+            u64::deserialize(&mut total_num_tokens_slice.read_bytes_async().await?)?;
+        Ok(InvertedIndexReader {
+            termdict,
+            postings_file_slice: postings_body,
+            positions_file_slice,
+            record_option,
+            total_num_tokens,
+        })
     }
 
-    async fn get_term_range_async<'a, A: Automaton + 'a>(
-        &'a self,
-        terms: impl std::ops::RangeBounds<Term>,
-        automaton: A,
-        limit: Option<u64>,
-        merge_holes_under_bytes: usize,
-    ) -> io::Result<impl Iterator<Item = TermInfo> + 'a>
-    where
-        A::State: Clone,
-    {
-        use std::ops::Bound;
-        let range_builder = self.termdict.search(automaton);
-        let range_builder = match terms.start_bound() {
-            Bound::Included(bound) => range_builder.ge(bound.serialized_value_bytes()),
-            Bound::Excluded(bound) => range_builder.gt(bound.serialized_value_bytes()),
-            Bound::Unbounded => range_builder,
-        };
-        let range_builder = match terms.end_bound() {
-            Bound::Included(bound) => range_builder.le(bound.serialized_value_bytes()),
-            Bound::Excluded(bound) => range_builder.lt(bound.serialized_value_bytes()),
-            Bound::Unbounded => range_builder,
-        };
-        let range_builder = if let Some(limit) = limit {
-            range_builder.limit(limit)
-        } else {
-            range_builder
-        };
-
-        let mut stream = range_builder
-            .into_stream_async_merging_holes(merge_holes_under_bytes)
-            .await?;
-
-        let iter = std::iter::from_fn(move || stream.next().map(|(_k, v)| v.clone()));
-
-        // limit on stream is only an optimization to load less data, the stream may still return
-        // more than limit elements.
-        let limit = limit.map(|limit| limit as usize).unwrap_or(usize::MAX);
-        let iter = iter.take(limit);
-
-        Ok(iter)
+    pub async fn get_term_info_async(&self, term: &Term) -> io::Result<Option<TermInfo>> {
+        self.termdict.get_async(term.serialized_value_bytes()).await
     }
 
     /// Warmup a block postings given a `Term`.
@@ -291,124 +267,112 @@ impl InvertedIndexReader {
         }
     }
 
-    /// Warmup a block postings given a range of `Term`s.
-    /// This method is for an advanced usage only.
-    ///
-    /// returns a boolean, whether a term matching the range was found in the dictionary
-    pub async fn warm_postings_range(
+    /// Most users should prefer using [`Self::read_postings_async()`] instead.
+    pub async fn read_block_postings_async(
         &self,
-        terms: impl std::ops::RangeBounds<Term>,
-        limit: Option<u64>,
-        with_positions: bool,
-    ) -> io::Result<bool> {
-        let mut term_info = self
-            .get_term_range_async(terms, AlwaysMatch, limit, 0)
-            .await?;
-
-        let Some(first_terminfo) = term_info.next() else {
-            // no key matches, nothing more to load
-            return Ok(false);
-        };
-
-        let last_terminfo = term_info.last().unwrap_or_else(|| first_terminfo.clone());
-
-        let postings_range = first_terminfo.postings_range.start..last_terminfo.postings_range.end;
-        let positions_range =
-            first_terminfo.positions_range.start..last_terminfo.positions_range.end;
-
-        let postings = self
-            .postings_file_slice
-            .read_bytes_slice_async(postings_range);
-        if with_positions {
-            let positions = self
-                .positions_file_slice
-                .read_bytes_slice_async(positions_range);
-            futures_util::future::try_join(postings, positions).await?;
-        } else {
-            postings.await?;
+        term: &Term,
+        option: IndexRecordOption,
+    ) -> io::Result<Option<BlockSegmentPostings>> {
+        match self.get_term_info_async(term).await? {
+            Some(term_info) => Ok(Some(
+                self.read_block_postings_from_terminfo_async(&term_info, option)
+                    .await?,
+            )),
+            None => Ok(None),
         }
-        Ok(true)
     }
 
-    /// Warmup a block postings given a range of `Term`s.
+    /// Returns a posting object given a `term_info` asynchronously.
     /// This method is for an advanced usage only.
     ///
-    /// returns a boolean, whether a term matching the range was found in the dictionary
-    pub async fn warm_postings_automaton<
-        A: Automaton + Clone + Send + 'static,
-        E: FnOnce(Box<dyn FnOnce() -> io::Result<()> + Send>) -> F,
-        F: std::future::Future<Output = io::Result<()>>,
-    >(
+    /// Most users should prefer using [`Self::read_postings_async()`] instead.
+    pub async fn read_postings_from_terminfo_async(
         &self,
-        automaton: A,
-        // with_positions: bool, at the moment we have no use for it, and supporting it would add
-        // complexity to the coalesce
-        executor: E,
-    ) -> io::Result<bool>
-    where
-        A::State: Clone,
-    {
-        // merge holes under 4MiB, that's how many bytes we can hope to receive during a TTFB from
-        // S3 (~80MiB/s, and 50ms latency)
-        const MERGE_HOLES_UNDER_BYTES: usize = (80 * 1024 * 1024 * 50) / 1000;
-        // we build a first iterator to download everything. Simply calling the function already
-        // download everything we need from the sstable, but doesn't start iterating over it.
-        let _term_info_iter = self
-            .get_term_range_async(.., automaton.clone(), None, MERGE_HOLES_UNDER_BYTES)
+        term_info: &TermInfo,
+        option: IndexRecordOption,
+    ) -> io::Result<SegmentPostings> {
+        let block_postings = self
+            .read_block_postings_from_terminfo_async(term_info, option)
             .await?;
-
-        let (sender, posting_ranges_to_load_stream) = futures_channel::mpsc::unbounded();
-        let termdict = self.termdict.clone();
-        let cpu_bound_task = move || {
-            // then we build a 2nd iterator, this one with no holes, so we don't go through blocks
-            // we can't match.
-            // This makes the assumption there is a caching layer below us, which gives sync read
-            // for free after the initial async access. This might not always be true, but is in
-            // Quickwit.
-            // We build things from this closure otherwise we get into lifetime issues that can only
-            // be solved with self referential strucs. Returning an io::Result from here is a bit
-            // more leaky abstraction-wise, but a lot better than the alternative
-            let mut stream = termdict.search(automaton).into_stream()?;
-
-            // we could do without an iterator, but this allows us access to coalesce which simplify
-            // things
-            let posting_ranges_iter =
-                std::iter::from_fn(move || stream.next().map(|(_k, v)| v.postings_range.clone()));
-
-            let merged_posting_ranges_iter = posting_ranges_iter.coalesce(|range1, range2| {
-                if range1.end + MERGE_HOLES_UNDER_BYTES >= range2.start {
-                    Ok(range1.start..range2.end)
-                } else {
-                    Err((range1, range2))
-                }
-            });
-
-            for posting_range in merged_posting_ranges_iter {
-                if let Err(_) = sender.unbounded_send(posting_range) {
-                    // this should happen only when search is cancelled
-                    return Err(io::Error::other("failed to send posting range back"));
-                }
+        let position_reader = {
+            if option.has_positions() {
+                let positions_data = self
+                    .positions_file_slice
+                    .read_bytes_slice_async(term_info.positions_range.clone())
+                    .await?;
+                let position_reader = PositionReader::open(positions_data)?;
+                Some(position_reader)
+            } else {
+                None
             }
-            Ok(())
         };
-        let task_handle = executor(Box::new(cpu_bound_task));
-
-        let posting_downloader = posting_ranges_to_load_stream
-            .map(|posting_slice| {
-                self.postings_file_slice
-                    .read_bytes_slice_async(posting_slice)
-                    .map(|result| result.map(|_slice| ()))
-            })
-            .buffer_unordered(5)
-            .try_collect::<Vec<()>>();
-
-        let (_, slices_downloaded) =
-            futures_util::future::try_join(task_handle, posting_downloader).await?;
-
-        Ok(!slices_downloaded.is_empty())
+        Ok(SegmentPostings::from_block_postings(
+            block_postings,
+            position_reader,
+        ))
     }
 
-    /// Warmup the block postings for all terms.
+    pub async fn read_postings_no_deletes_async(
+        &self,
+        term: &Term,
+        option: IndexRecordOption,
+    ) -> io::Result<Option<SegmentPostings>> {
+        match self.get_term_info_async(term).await? {
+            None => None,
+            Some(term_info) => Some(
+                self.read_postings_from_terminfo_async(&term_info, option)
+                    .await,
+            ),
+        }
+        .transpose()
+    }
+
+    /// Returns a block postings given a `term_info` asynchronously.
+    /// This method is for an advanced usage only.
+    ///
+    /// Most users should prefer using [`Self::read_postings_async()`] instead.
+    pub async fn read_block_postings_from_terminfo_async(
+        &self,
+        term_info: &TermInfo,
+        requested_option: IndexRecordOption,
+    ) -> io::Result<BlockSegmentPostings> {
+        let postings_data = self
+            .postings_file_slice
+            .slice(term_info.postings_range.clone());
+        BlockSegmentPostings::open_async(
+            term_info.doc_freq,
+            postings_data,
+            self.record_option,
+            requested_option,
+        )
+        .await
+    }
+
+    /// Returns the segment postings associated with the term asynchronously, and with the given
+    /// option, or `None` if the term has never been encountered and indexed.
+    ///
+    /// If the field was not indexed with the indexing options that cover
+    /// the requested options, the returned [`SegmentPostings`] the method does not fail
+    /// and returns a `SegmentPostings` with as much information as possible.
+    ///
+    /// For instance, requesting [`IndexRecordOption::WithFreqs`] for a
+    /// [`TextOptions`](crate::schema::TextOptions) that does not index position
+    /// will return a [`SegmentPostings`] with `DocId`s and frequencies.
+    pub async fn read_postings_async(
+        &self,
+        term: &Term,
+        option: IndexRecordOption,
+    ) -> io::Result<Option<SegmentPostings>> {
+        match self.get_term_info_async(term).await? {
+            None => None,
+            Some(term_info) => Some(
+                self.read_postings_from_terminfo_async(&term_info, option)
+                    .await,
+            ),
+        }
+        .transpose()
+    }
+
     /// This method is for an advanced usage only.
     ///
     /// If you know which terms to pre-load, prefer using [`Self::warm_postings`] or

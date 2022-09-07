@@ -118,14 +118,13 @@ fn validate_memory_consumption(
 
 #[cfg(test)]
 mod tests {
+    use crate::aggregation::agg_req::Aggregations;
+    use crate::aggregation::bucket::tests::get_test_index_from_docs;
     use crate::aggregation::tests::exec_request_with_query;
 
     // https://github.com/quickwit-oss/quickwit/issues/3837
     #[test]
     fn test_agg_limits_with_empty_merge() {
-        use crate::aggregation::agg_req::Aggregations;
-        use crate::aggregation::bucket::tests::get_test_index_from_docs;
-
         let docs = vec![
             vec![r#"{ "date": "2015-01-02T00:00:00Z", "text": "bbb", "text2": "bbb" }"#],
             vec![r#"{ "text": "aaa", "text2": "bbb" }"#],

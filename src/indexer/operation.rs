@@ -3,10 +3,16 @@ use crate::schema::document::Document;
 use crate::schema::{TantivyDocument, Term};
 use crate::Opstamp;
 
+/// Policy on how to choose deletion target
+pub enum DeleteTarget {
+    Query(Box<dyn Weight>),
+    Term(Term),
+}
+
 /// Timestamped Delete operation.
 pub struct DeleteOperation {
     pub opstamp: Opstamp,
-    pub target: Box<dyn Weight>,
+    pub target: DeleteTarget,
 }
 
 /// Timestamped Add operation.

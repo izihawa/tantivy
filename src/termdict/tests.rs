@@ -8,7 +8,7 @@ use crate::postings::TermInfo;
 const BLOCK_SIZE: usize = 1_500;
 
 fn make_term_info(term_ord: u64) -> TermInfo {
-    let offset = |term_ord: u64| (term_ord * 100 + term_ord * term_ord) as usize;
+    let offset = |term_ord: u64| (term_ord * 100 + term_ord * term_ord);
     TermInfo {
         doc_freq: term_ord as u32,
         postings_range: offset(term_ord)..offset(term_ord + 1),

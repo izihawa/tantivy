@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::collector::top_collector::{TopCollector, TopSegmentCollector};
 use crate::collector::{Collector, SegmentCollector};
 use crate::{DocAddress, DocId, Score, SegmentReader};
@@ -8,7 +10,8 @@ pub(crate) struct CustomScoreTopCollector<TCustomScorer, TScore = Score> {
 }
 
 impl<TCustomScorer, TScore> CustomScoreTopCollector<TCustomScorer, TScore>
-where TScore: Clone + PartialOrd
+where
+    TScore: Clone + PartialOrd,
 {
     pub(crate) fn new(
         custom_scorer: TCustomScorer,
@@ -35,18 +38,28 @@ pub trait CustomSegmentScorer<TScore>: 'static {
 /// The `CustomerScorer` itself does not make much of the computation itself.
 /// Instead, it helps constructing `Self::Child` instances that will compute
 /// the score at a segment scale.
+#[async_trait]
 pub trait CustomScorer<TScore>: Sync {
     /// Type of the associated [`CustomSegmentScorer`].
     type Child: CustomSegmentScorer<TScore>;
     /// Builds a child scorer for a specific segment. The child scorer is associated with
     /// a specific segment.
     fn segment_scorer(&self, segment_reader: &SegmentReader) -> crate::Result<Self::Child>;
+    #[cfg(feature = "quickwit")]
+    async fn segment_scorer_async(
+        &self,
+        segment_reader: &SegmentReader,
+    ) -> crate::Result<Self::Child> {
+        self.segment_scorer(segment_reader)
+    }
 }
 
+#[async_trait]
 impl<TCustomScorer, TScore> Collector for CustomScoreTopCollector<TCustomScorer, TScore>
 where
     TCustomScorer: CustomScorer<TScore> + Send + Sync,
     TScore: 'static + PartialOrd + Clone + Send + Sync,
+    <TCustomScorer as CustomScorer<TScore>>::Child: Send,
 {
     type Fruit = Vec<(TScore, DocAddress)>;
 
@@ -59,6 +72,23 @@ where
     ) -> crate::Result<Self::Child> {
         let segment_collector = self.collector.for_segment(segment_local_id, segment_reader);
         let segment_scorer = self.custom_scorer.segment_scorer(segment_reader)?;
+        Ok(CustomScoreTopSegmentCollector {
+            segment_collector,
+            segment_scorer,
+        })
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn for_segment_async(
+        &self,
+        segment_local_id: u32,
+        segment_reader: &SegmentReader,
+    ) -> crate::Result<Self::Child> {
+        let segment_collector = self.collector.for_segment(segment_local_id, segment_reader);
+        let segment_scorer = self
+            .custom_scorer
+            .segment_scorer_async(segment_reader)
+            .await?;
         Ok(CustomScoreTopSegmentCollector {
             segment_collector,
             segment_scorer,
@@ -86,7 +116,7 @@ where
 impl<T, TScore> SegmentCollector for CustomScoreTopSegmentCollector<T, TScore>
 where
     TScore: 'static + PartialOrd + Clone + Send + Sync,
-    T: 'static + CustomSegmentScorer<TScore>,
+    T: 'static + CustomSegmentScorer<TScore> + Send,
 {
     type Fruit = Vec<(TScore, DocAddress)>;
 
@@ -113,7 +143,8 @@ where
 }
 
 impl<F, TScore> CustomSegmentScorer<TScore> for F
-where F: 'static + FnMut(DocId) -> TScore
+where
+    F: 'static + FnMut(DocId) -> TScore,
 {
     fn score(&mut self, doc: DocId) -> TScore {
         (self)(doc)

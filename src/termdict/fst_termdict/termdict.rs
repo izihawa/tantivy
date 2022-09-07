@@ -28,7 +28,8 @@ pub struct TermDictionaryBuilder<W> {
 }
 
 impl<W> TermDictionaryBuilder<W>
-where W: Write
+where
+    W: Write,
 {
     /// Creates a new `TermDictionaryBuilder`
     pub fn create(w: W) -> io::Result<Self> {
@@ -134,13 +135,17 @@ impl TermDictionary {
             ));
         }
 
-        let (fst_file_slice, values_file_slice) = main_slice.split_from_end(footer_size as usize);
+        let (fst_file_slice, values_file_slice) = main_slice.split_from_end(footer_size);
         let fst_index = open_fst_index(fst_file_slice)?;
         let term_info_store = TermInfoStore::open(values_file_slice)?;
         Ok(TermDictionary {
             fst_index: Arc::new(fst_index),
             term_info_store,
         })
+    }
+
+    pub async fn open_async(file: FileSlice) -> io::Result<Self> {
+        Self::open(file)
     }
 
     /// Creates an empty term dictionary which contains no terms.
@@ -202,6 +207,10 @@ impl TermDictionary {
             .map(|term_ord| self.term_info_from_ord(term_ord)))
     }
 
+    pub async fn get_async<K: AsRef<[u8]>>(&self, key: K) -> io::Result<Option<TermInfo>> {
+        self.get(key)
+    }
+
     /// Returns a range builder, to stream all of the terms
     /// within an interval.
     pub fn range(&self) -> TermStreamerBuilder<'_> {
@@ -218,5 +227,9 @@ impl TermDictionary {
     pub fn search<'a, A: Automaton + 'a>(&'a self, automaton: A) -> TermStreamerBuilder<'a, A> {
         let stream_builder = self.fst_index.search(automaton);
         TermStreamerBuilder::<A>::new(self, stream_builder)
+    }
+
+    pub async fn warm_up_dictionary_async(&self) -> io::Result<()> {
+        Ok(())
     }
 }

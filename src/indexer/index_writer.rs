@@ -16,13 +16,13 @@ use crate::index::{Index, Segment, SegmentComponent, SegmentId, SegmentMeta, Seg
 use crate::indexer::delete_queue::{DeleteCursor, DeleteQueue};
 use crate::indexer::doc_opstamp_mapping::DocToOpstampMapping;
 use crate::indexer::index_writer_status::IndexWriterStatus;
-use crate::indexer::operation::DeleteOperation;
+use crate::indexer::operation::{DeleteOperation, DeleteTarget};
 use crate::indexer::stamper::Stamper;
 use crate::indexer::{MergePolicy, SegmentEntry, SegmentWriter};
 use crate::query::{EnableScoring, Query, TermQuery};
 use crate::schema::document::Document;
 use crate::schema::{IndexRecordOption, TantivyDocument, Term};
-use crate::{FutureResult, Opstamp};
+use crate::{DocSet, FutureResult, Opstamp, TERMINATED};
 
 // Size of the margin for the `memory_arena`. A segment is closed when the remaining memory
 // in the `memory_arena` goes below MARGIN_IN_BYTES.
@@ -107,16 +107,33 @@ fn compute_deleted_bitset(
 
         // A delete operation should only affect
         // document that were inserted before it.
-        delete_op
-            .target
-            .for_each_no_score(segment_reader, &mut |docs_matching_delete_query| {
-                for doc_matching_delete_query in docs_matching_delete_query.iter().cloned() {
-                    if doc_opstamps.is_deleted(doc_matching_delete_query, delete_op.opstamp) {
-                        alive_bitset.remove(doc_matching_delete_query);
-                        might_have_changed = true;
+        match &delete_op.target {
+            DeleteTarget::Query(query) => {
+                query.for_each_no_score(segment_reader, &mut |docs_matching_delete_query| {
+                    for doc_matching_delete_query in docs_matching_delete_query.iter().cloned() {
+                        if doc_opstamps.is_deleted(doc_matching_delete_query, delete_op.opstamp) {
+                            alive_bitset.remove(doc_matching_delete_query);
+                            might_have_changed = true;
+                        }
+                    }
+                })?;
+            }
+            DeleteTarget::Term(term) => {
+                let inverted_index = segment_reader.inverted_index(term.field())?;
+                if let Some(mut docset) =
+                    inverted_index.read_postings(term, IndexRecordOption::Basic)?
+                {
+                    let mut doc_matching_deleted_term = docset.doc();
+                    while doc_matching_deleted_term != TERMINATED {
+                        if doc_opstamps.is_deleted(doc_matching_deleted_term, delete_op.opstamp) {
+                            alive_bitset.remove(doc_matching_deleted_term);
+                            might_have_changed = true;
+                        }
+                        doc_matching_deleted_term = docset.advance();
                     }
                 }
-            })?;
+            }
+        }
         delete_cursor.advance();
     }
     Ok(might_have_changed)
@@ -467,7 +484,7 @@ impl<D: Document> IndexWriter<D> {
     }
 
     /// Setter for the merge policy.
-    pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
+    pub fn set_merge_policy(&self, merge_policy: Arc<dyn MergePolicy>) {
         self.segment_updater.set_merge_policy(merge_policy);
     }
 
@@ -532,8 +549,25 @@ impl<D: Document> IndexWriter<D> {
     /// If all segments are empty no new segment will be created.
     ///
     /// `segment_ids` is required to be non-empty.
-    pub fn merge(&mut self, segment_ids: &[SegmentId]) -> FutureResult<Option<SegmentMeta>> {
-        let merge_operation = self.segment_updater.make_merge_operation(segment_ids);
+    pub fn merge(&self, segment_ids: &[SegmentId]) -> FutureResult<Option<SegmentMeta>> {
+        self.merge_with_attributes(segment_ids, None)
+    }
+
+    /// Merges a given list of segments and set attributes in merged segment.
+    ///
+    /// If all segments are empty no new segment will be created.
+    ///
+    /// `segment_ids` is required to be non-empty.
+    /// set `override_segment_attributes` to `Some(...)` if you want to
+    /// override segment attributes, otherwise it should be set to `None`
+    pub fn merge_with_attributes(
+        &self,
+        segment_ids: &[SegmentId],
+        override_segment_attributes: Option<serde_json::Value>,
+    ) -> FutureResult<Option<SegmentMeta>> {
+        let merge_operation = self
+            .segment_updater
+            .make_merge_operation(segment_ids, override_segment_attributes);
         let segment_updater = self.segment_updater.clone();
         segment_updater.start_merge(merge_operation)
     }
@@ -678,11 +712,13 @@ impl<D: Document> IndexWriter<D> {
     /// Like adds, the deletion itself will be visible
     /// only after calling `commit()`.
     pub fn delete_term(&self, term: Term) -> Opstamp {
-        let query = TermQuery::new(term, IndexRecordOption::Basic);
-        // For backward compatibility, if Term is invalid for the index, do nothing but return an
-        // Opstamp
-        self.delete_query(Box::new(query))
-            .unwrap_or_else(|_| self.stamper.stamp())
+        let opstamp = self.stamper.stamp();
+        let delete_operation = DeleteOperation {
+            opstamp,
+            target: DeleteTarget::Term(term),
+        };
+        self.delete_queue.push(delete_operation);
+        opstamp
     }
 
     /// Delete all documents matching a given query.
@@ -700,7 +736,7 @@ impl<D: Document> IndexWriter<D> {
         let opstamp = self.stamper.stamp();
         let delete_operation = DeleteOperation {
             opstamp,
-            target: weight,
+            target: DeleteTarget::Query(weight),
         };
         self.delete_queue.push(delete_operation);
         Ok(opstamp)
@@ -776,12 +812,9 @@ impl<D: Document> IndexWriter<D> {
         for (user_op, opstamp) in user_operations_it.zip(stamps) {
             match user_op {
                 UserOperation::Delete(term) => {
-                    let query = TermQuery::new(term, IndexRecordOption::Basic);
-                    let weight =
-                        query.weight(EnableScoring::disabled_from_schema(&self.index.schema()))?;
                     let delete_operation = DeleteOperation {
                         opstamp,
-                        target: weight,
+                        target: DeleteTarget::Term(term),
                     };
                     self.delete_queue.push(delete_operation);
                 }
@@ -804,6 +837,106 @@ impl<D: Document> IndexWriter<D> {
     }
 }
 
+#[cfg(feature = "quickwit")]
+impl<D: Document> IndexWriter<D> {
+    pub(crate) async fn new_async(
+        index: &Index,
+        options: IndexWriterOptions,
+        directory_lock: DirectoryLock,
+    ) -> crate::Result<Self> {
+        if options.memory_budget_per_thread < MEMORY_BUDGET_NUM_BYTES_MIN {
+            let err_msg = format!(
+                "The memory arena in bytes per thread needs to be at least \
+                 {MEMORY_BUDGET_NUM_BYTES_MIN}."
+            );
+            return Err(TantivyError::InvalidArgument(err_msg));
+        }
+        if options.memory_budget_per_thread >= MEMORY_BUDGET_NUM_BYTES_MAX {
+            let err_msg = format!(
+                "The memory arena in bytes per thread cannot exceed {MEMORY_BUDGET_NUM_BYTES_MAX}"
+            );
+            return Err(TantivyError::InvalidArgument(err_msg));
+        }
+        if options.num_worker_threads == 0 {
+            let err_msg = "At least one worker thread is required, got 0".to_string();
+            return Err(TantivyError::InvalidArgument(err_msg));
+        }
+
+        let (document_sender, document_receiver) =
+            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+
+        let delete_queue = DeleteQueue::new();
+
+        let current_opstamp = index.load_metas_async().await?.opstamp;
+
+        let stamper = Stamper::new(current_opstamp);
+
+        let segment_updater = SegmentUpdater::create_async(
+            index.clone(),
+            stamper.clone(),
+            &delete_queue.cursor(),
+            options.num_merge_threads,
+        )
+        .await?;
+
+        let mut index_writer = Self {
+            _directory_lock: Some(directory_lock),
+
+            options: options.clone(),
+            index: index.clone(),
+            index_writer_status: IndexWriterStatus::from(document_receiver),
+            operation_sender: document_sender,
+
+            segment_updater,
+
+            workers_join_handle: vec![],
+
+            delete_queue,
+
+            committed_opstamp: current_opstamp,
+            stamper,
+
+            worker_id: 0,
+        };
+        index_writer.start_workers()?;
+        Ok(index_writer)
+    }
+
+    pub async fn rollback_async(&mut self) -> crate::Result<Opstamp> {
+        info!("Rolling back to opstamp {}", self.committed_opstamp);
+        // marks the segment updater as killed. From now on, all
+        // segment updates will be ignored.
+        self.segment_updater.kill();
+        let document_receiver_res = self.operation_receiver();
+
+        // take the directory lock to create a new index_writer.
+        let directory_lock = self
+            ._directory_lock
+            .take()
+            .expect("The IndexWriter does not have any lock. This is a bug, please report.");
+
+        let new_index_writer =
+            IndexWriter::new_async(&self.index, self.options.clone(), directory_lock).await?;
+
+        // the current `self` is dropped right away because of this call.
+        //
+        // This will drop the document queue, and the thread
+        // should terminate.
+        *self = new_index_writer;
+
+        // Drains the document receiver pipeline :
+        // Workers don't need to index the pending documents.
+        //
+        // This will reach an end as the only document_sender
+        // was dropped with the index_writer.
+        if let Ok(document_receiver) = document_receiver_res {
+            for _ in document_receiver {}
+        }
+
+        Ok(self.committed_opstamp)
+    }
+}
+
 impl<D: Document> Drop for IndexWriter<D> {
     fn drop(&mut self) {
         self.segment_updater.kill();
@@ -818,6 +951,7 @@ impl<D: Document> Drop for IndexWriter<D> {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::net::Ipv6Addr;
+    use std::sync::Arc;
 
     use columnar::{Column, MonotonicallyMappableToU128};
     use itertools::Itertools;
@@ -1005,7 +1139,7 @@ mod tests {
             "LogMergePolicy { min_num_segments: 8, max_docs_before_merge: 10000000, \
              min_layer_size: 10000, level_log_size: 0.75, del_docs_ratio_before_merge: 1.0 }"
         );
-        let merge_policy = Box::<NoMergePolicy>::default();
+        let merge_policy = Arc::<NoMergePolicy>::default();
         index_writer.set_merge_policy(merge_policy);
         assert_eq!(
             format!("{:?}", index_writer.get_merge_policy()),
@@ -1671,7 +1805,7 @@ mod tests {
             .settings(settings)
             .create_in_ram()?;
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
         let old_reader = index.reader()?;
 
@@ -1769,7 +1903,7 @@ mod tests {
         let num_segments_before_merge = searcher.segment_readers().len();
         if force_end_merge {
             index_writer.wait_merging_threads()?;
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
@@ -2287,6 +2421,8 @@ mod tests {
 
     use proptest::prelude::*;
 
+    use crate::merge_policy::LogMergePolicy;
+
     proptest! {
 
         #![proptest_config(ProptestConfig::with_cases(20))]
@@ -2420,7 +2556,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::builder().schema(schema).create_in_ram()?;
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
         let existing_id = 16u64;
         let deleted_id = 13u64;
@@ -2436,7 +2572,7 @@ mod tests {
         // Merge
         {
             assert!(index_writer.wait_merging_threads().is_ok());
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
@@ -2465,7 +2601,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::builder().schema(schema).create_in_ram()?;
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
         index_writer.add_document(doc!(
             id_field=>10i64,
@@ -2478,7 +2614,7 @@ mod tests {
         // Merge
         {
             assert!(index_writer.wait_merging_threads().is_ok());
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
@@ -2516,7 +2652,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::builder().schema(schema).create_in_ram()?;
         let mut index_writer = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
 
         index_writer
             .add_document(doc!(
@@ -2580,5 +2716,49 @@ mod tests {
             "Writer should reject options with too high memory size"
         );
         assert!(matches!(result, Err(TantivyError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_deletion_bug() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let id_field = schema_builder.add_i64_field("id", FAST | INDEXED | STORED);
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let schema = schema_builder.build();
+        let index = Index::builder().schema(schema).create_in_ram()?;
+        let mut index_writer = index.writer_with_num_threads(12, 1024 * 1024 * 1024)?;
+        index_writer.set_merge_policy(Arc::new(LogMergePolicy::default()));
+        for i in 1..100000 {
+            index_writer.add_document(doc!(
+                id_field=>i as i64,
+                text_field=>"1 2 3 4 5 6 7 8 9 10",
+            ))?;
+        }
+        index_writer.commit()?;
+        for i in 100000..110000 {
+            index_writer.delete_term(Term::from_field_i64(id_field, 50000));
+            index_writer.add_document(doc!(
+                id_field=>50000i64,
+                text_field=>"1 2 3 4 5 6 7 8 9 10",
+            ))?;
+            index_writer.add_document(doc!(
+                id_field=>i as i64,
+                text_field=>"1 2 3 4 5 6 7 8 9 10",
+            ))?;
+            if i % 100 == 0 {
+                index_writer.commit()?;
+                let reader = index.reader()?;
+                reader.reload()?;
+                let searcher = reader.searcher();
+                let query = TermQuery::new(
+                    Term::from_field_i64(id_field, 50000i64),
+                    IndexRecordOption::Basic,
+                );
+                let top_docs: Vec<(f32, DocAddress)> =
+                    searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+
+                assert_eq!(top_docs.len(), 1); // Fails, top_docs.len() equals to 0
+            }
+        }
+        Ok(())
     }
 }

@@ -155,8 +155,8 @@ impl<'a> FieldSerializer<'a> {
                 positions_serializer.written_bytes()
             } else {
                 0u64
-            } as usize;
-        let addr = self.postings_serializer.written_bytes() as usize;
+            };
+        let addr = self.postings_serializer.written_bytes();
         TermInfo {
             doc_freq: 0,
             postings_range: addr..addr,
@@ -216,13 +216,11 @@ impl<'a> FieldSerializer<'a> {
         if self.term_open {
             self.postings_serializer
                 .close_term(self.current_term_info.doc_freq)?;
-            self.current_term_info.postings_range.end =
-                self.postings_serializer.written_bytes() as usize;
+            self.current_term_info.postings_range.end = self.postings_serializer.written_bytes();
 
             if let Some(positions_serializer) = self.positions_serializer_opt.as_mut() {
                 positions_serializer.close_term()?;
-                self.current_term_info.positions_range.end =
-                    positions_serializer.written_bytes() as usize;
+                self.current_term_info.positions_range.end = positions_serializer.written_bytes();
             }
             self.term_dictionary_builder
                 .insert_value(&self.current_term_info)?;

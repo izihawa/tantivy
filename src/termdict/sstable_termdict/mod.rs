@@ -2,8 +2,6 @@ use std::io;
 
 mod merger;
 
-use std::iter::ExactSizeIterator;
-
 use common::VInt;
 use sstable::value::{ValueReader, ValueWriter};
 use sstable::SSTable;
@@ -56,14 +54,14 @@ impl ValueReader for TermInfoValueReader {
         let len_before = data.len();
         self.term_infos.clear();
         let num_els = VInt::deserialize_u64(&mut data)?;
-        let mut postings_start = VInt::deserialize_u64(&mut data)? as usize;
-        let mut positions_start = VInt::deserialize_u64(&mut data)? as usize;
+        let mut postings_start = VInt::deserialize_u64(&mut data)?;
+        let mut positions_start = VInt::deserialize_u64(&mut data)?;
         for _ in 0..num_els {
             let doc_freq = VInt::deserialize_u64(&mut data)? as u32;
             let postings_num_bytes = VInt::deserialize_u64(&mut data)?;
             let positions_num_bytes = VInt::deserialize_u64(&mut data)?;
-            let postings_end = postings_start + postings_num_bytes as usize;
-            let positions_end = positions_start + positions_num_bytes as usize;
+            let postings_end = postings_start + postings_num_bytes;
+            let positions_end = positions_start + positions_num_bytes;
             let term_info = TermInfo {
                 doc_freq,
                 postings_range: postings_start..postings_end,
@@ -95,12 +93,14 @@ impl ValueWriter for TermInfoValueWriter {
         if self.term_infos.is_empty() {
             return;
         }
-        VInt(self.term_infos[0].postings_range.start as u64).serialize_into_vec(buffer);
-        VInt(self.term_infos[0].positions_range.start as u64).serialize_into_vec(buffer);
+        VInt(self.term_infos[0].postings_range.start).serialize_into_vec(buffer);
+        VInt(self.term_infos[0].positions_range.start).serialize_into_vec(buffer);
         for term_info in &self.term_infos {
             VInt(term_info.doc_freq as u64).serialize_into_vec(buffer);
-            VInt(term_info.postings_range.len() as u64).serialize_into_vec(buffer);
-            VInt(term_info.positions_range.len() as u64).serialize_into_vec(buffer);
+            VInt(term_info.postings_range.end - term_info.postings_range.start)
+                .serialize_into_vec(buffer);
+            VInt(term_info.positions_range.end - term_info.positions_range.start)
+                .serialize_into_vec(buffer);
         }
     }
 

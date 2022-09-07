@@ -90,10 +90,10 @@ impl CheckpointBlock {
             return Ok(());
         }
         let mut doc = read_u32_vint(data);
-        let mut start_offset = VInt::deserialize_u64(data)? as usize;
+        let mut start_offset = VInt::deserialize_u64(data)? as u64;
         for _ in 0..len {
             let num_docs = read_u32_vint(data);
-            let block_num_bytes = read_u32_vint(data) as usize;
+            let block_num_bytes = read_u32_vint(data) as u64;
             self.checkpoints.push(Checkpoint {
                 doc_range: doc..doc + num_docs,
                 byte_range: start_offset..start_offset + block_num_bytes,
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_block_serialize() -> io::Result<()> {
-        let offsets: Vec<usize> = (0..11).map(|i| i * i * i).collect();
+        let offsets: Vec<u64> = (0..11).map(|i| i * i * i).collect();
         let mut checkpoints = vec![];
         let mut start_doc = 0;
         for i in 0..10 {

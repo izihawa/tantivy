@@ -20,7 +20,7 @@ use crate::DocId;
 #[derive(Clone, Eq, PartialEq, Default)]
 pub struct Checkpoint {
     pub doc_range: Range<DocId>,
-    pub byte_range: Range<usize>,
+    pub byte_range: Range<u64>,
 }
 
 impl Checkpoint {
@@ -40,6 +40,7 @@ impl fmt::Debug for Checkpoint {
 mod tests {
 
     use std::io;
+    use std::sync::Arc;
 
     use proptest::prelude::*;
 
@@ -118,8 +119,8 @@ mod tests {
         Ok(())
     }
 
-    fn offset_test(doc: DocId) -> usize {
-        (doc as usize) * (doc as usize)
+    fn offset_test(doc: DocId) -> u64 {
+        (doc as u64) * (doc as u64)
     }
 
     #[test]
@@ -129,8 +130,8 @@ mod tests {
         let body = schema_builder.add_text_field("body", STORED);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer: IndexWriter = index.writer_for_tests()?;
-        index_writer.set_merge_policy(Box::new(NoMergePolicy));
+        let mut index_writer = index.writer_for_tests()?;
+        index_writer.set_merge_policy(Arc::new(NoMergePolicy));
         let long_text: String = "abcdefghijklmnopqrstuvwxyz".repeat(1_000);
         for _ in 0..20 {
             index_writer.add_document(doc!(body=>long_text.clone()))?;
@@ -200,7 +201,7 @@ mod tests {
                         (0..docs.len() - 1)
                             .map(move |i| Checkpoint {
                                 doc_range: docs[i] as DocId..docs[i + 1] as DocId,
-                                byte_range: offsets[i]..offsets[i + 1],
+                                byte_range: offsets[i] as u64..offsets[i + 1] as u64,
                             })
                             .collect::<Vec<Checkpoint>>()
                     })

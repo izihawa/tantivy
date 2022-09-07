@@ -110,7 +110,7 @@ impl DocSet for TermScorer {
         self.postings.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.postings.size_hint()
     }
 }
@@ -125,6 +125,8 @@ impl Scorer for TermScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use proptest::prelude::*;
 
     use crate::index::SegmentId;
@@ -301,7 +303,7 @@ mod tests {
             index.writer_with_num_threads(3, 3 * MEMORY_BUDGET_NUM_BYTES_MIN)?;
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        writer.set_merge_policy(Box::new(NoMergePolicy));
+        writer.set_merge_policy(Arc::new(NoMergePolicy));
         for _ in 0..3_000 {
             let term_freq = rng.gen_range(1..10000);
             let words: Vec<&str> = std::iter::repeat("bbbb").take(term_freq).collect();

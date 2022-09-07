@@ -1,7 +1,7 @@
 [package]
-name = "tantivy-query-grammar"
-version = "0.22.0"
-authors = ["Paul Masurel <paul.masurel@gmail.com>"]
+name = "izihawa-tantivy-query-grammar"
+version = "0.25.0"
+authors = ["Pasha Podolsky <ppodolsky@me.com>"]
 license = "MIT"
 categories = ["database-implementations", "data-structures"]
 description = """Search engine library"""

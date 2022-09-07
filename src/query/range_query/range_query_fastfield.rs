@@ -1,6 +1,7 @@
 //! Fastfields support efficient scanning for range queries.
 //! We use this variant only if the fastfield exists, otherwise the default in `range_query` is
 //! used, which uses the term dictionary + postings.
+use async_trait::async_trait;
 
 use std::net::Ipv6Addr;
 use std::ops::{Bound, RangeInclusive};
@@ -32,9 +33,18 @@ impl FastFieldRangeQuery {
     }
 }
 
+#[async_trait]
 impl Query for FastFieldRangeQuery {
     fn weight(&self, _enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(FastFieldRangeWeight::new(self.bounds.clone())))
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.weight(enable_scoring)
     }
 }
 

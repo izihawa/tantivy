@@ -1,5 +1,6 @@
 use std::fmt;
 
+use async_trait::async_trait;
 use downcast_rs::impl_downcast;
 
 use super::bm25::Bm25StatisticsProvider;
@@ -22,6 +23,7 @@ pub enum EnableScoring<'a> {
         /// Normally this should be the [Searcher], but you can specify a custom
         /// one to adjust the statistics.
         statistics_provider: &'a dyn Bm25StatisticsProvider,
+        with_fieldnorms: bool,
     },
     /// Pass this to disable scoring.
     /// This can improve performance.
@@ -39,6 +41,15 @@ impl<'a> EnableScoring<'a> {
         EnableScoring::Enabled {
             searcher,
             statistics_provider: searcher,
+            with_fieldnorms: true,
+        }
+    }
+
+    pub fn enabled_from_searcher_without_fieldnorms(searcher: &'a Searcher) -> EnableScoring<'a> {
+        EnableScoring::Enabled {
+            searcher,
+            statistics_provider: searcher,
+            with_fieldnorms: false,
         }
     }
 
@@ -50,6 +61,7 @@ impl<'a> EnableScoring<'a> {
         EnableScoring::Enabled {
             statistics_provider,
             searcher,
+            with_fieldnorms: true,
         }
     }
 
@@ -89,6 +101,17 @@ impl<'a> EnableScoring<'a> {
     pub fn is_scoring_enabled(&self) -> bool {
         matches!(self, EnableScoring::Enabled { .. })
     }
+
+    /// Returns true if the scoring is enabled.
+    pub fn is_fieldnorms_enabled(&self) -> bool {
+        matches!(
+            self,
+            EnableScoring::Enabled {
+                with_fieldnorms: true,
+                ..
+            }
+        )
+    }
 }
 
 /// The `Query` trait defines a set of documents and a scoring method
@@ -125,6 +148,7 @@ impl<'a> EnableScoring<'a> {
 ///
 /// [`Scorer`]: crate::query::Scorer
 /// [`SegmentReader`]: crate::SegmentReader
+#[async_trait]
 pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// Create the weight associated with a query.
     ///
@@ -133,6 +157,15 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     ///
     /// See [`Weight`].
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>>;
+
+    /// Create the weight associated with a query asynchronously.
+    ///
+    /// See [`Self::weight`].
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>>;
 
     /// Returns an `Explanation` for the score of the document.
     fn explain(&self, searcher: &Searcher, doc_address: DocAddress) -> crate::Result<Explanation> {
@@ -147,6 +180,19 @@ pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
         let mut result = 0;
         for reader in searcher.segment_readers() {
             result += weight.count(reader)? as usize;
+        }
+        Ok(result)
+    }
+
+    /// Returns the number of documents matching the query.
+    #[cfg(feature = "quickwit")]
+    async fn count_async(&self, searcher: &Searcher) -> crate::Result<usize> {
+        let weight = self
+            .weight_async(EnableScoring::disabled_from_schema(searcher.schema()))
+            .await?;
+        let mut result = 0;
+        for reader in searcher.segment_readers() {
+            result += weight.count_async(reader).await? as usize;
         }
         Ok(result)
     }
@@ -169,16 +215,26 @@ pub trait QueryClone {
 }
 
 impl<T> QueryClone for T
-where T: 'static + Query + Clone
+where
+    T: 'static + Query + Clone,
 {
     fn box_clone(&self) -> Box<dyn Query> {
         Box::new(self.clone())
     }
 }
 
+#[async_trait]
 impl Query for Box<dyn Query> {
     fn weight(&self, enabled_scoring: EnableScoring) -> crate::Result<Box<dyn Weight>> {
         self.as_ref().weight(enabled_scoring)
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        self.as_ref().weight_async(enable_scoring).await
     }
 
     fn count(&self, searcher: &Searcher) -> crate::Result<usize> {

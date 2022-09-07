@@ -38,16 +38,16 @@ impl Layer {
         self.cursor_at_offset(0)
     }
 
-    fn cursor_at_offset(&self, start_offset: usize) -> impl Iterator<Item = Checkpoint> + '_ {
+    fn cursor_at_offset(&self, start_offset: u64) -> impl Iterator<Item = Checkpoint> + '_ {
         let data = &self.data.as_slice();
         LayerCursor {
-            remaining: &data[start_offset..],
+            remaining: &data[start_offset as usize..],
             block: CheckpointBlock::default(),
             cursor: 0,
         }
     }
 
-    fn seek_start_at_offset(&self, target: DocId, offset: usize) -> Option<Checkpoint> {
+    fn seek_start_at_offset(&self, target: DocId, offset: u64) -> Option<Checkpoint> {
         self.cursor_at_offset(offset)
             .find(|checkpoint| checkpoint.doc_range.end > target)
     }
@@ -87,7 +87,7 @@ impl SkipIndex {
         let first_layer_len = self
             .layers
             .first()
-            .map(|layer| layer.data.len())
+            .map(|layer| layer.data.len() as u64)
             .unwrap_or(0);
         let mut cur_checkpoint = Checkpoint {
             doc_range: 0u32..1u32,

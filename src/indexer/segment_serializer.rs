@@ -9,11 +9,11 @@ use crate::store::StoreWriter;
 /// Segment serializer is in charge of laying out on disk
 /// the data accumulated and sorted by the `SegmentWriter`.
 pub struct SegmentSerializer {
-    segment: Segment,
+    pub(crate) segment: Segment,
     pub(crate) store_writer: StoreWriter,
-    fast_field_write: WritePtr,
-    fieldnorms_serializer: Option<FieldNormsSerializer>,
-    postings_serializer: InvertedIndexSerializer,
+    pub(crate) fast_field_write: WritePtr,
+    pub(crate) fieldnorms_serializer: Option<FieldNormsSerializer>,
+    pub(crate) postings_serializer: InvertedIndexSerializer,
 }
 
 impl SegmentSerializer {
@@ -26,7 +26,7 @@ impl SegmentSerializer {
                 store_write,
                 settings.docstore_compression,
                 settings.docstore_blocksize,
-                settings.docstore_compress_dedicated_thread,
+                settings.docstore_compress_threads,
             )?
         };
 

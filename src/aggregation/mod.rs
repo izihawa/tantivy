@@ -177,7 +177,9 @@ fn parse_str_into_f64<E: de::Error>(value: &str) -> Result<f64, E> {
 
 /// deserialize Option<f64> from string or float
 pub(crate) fn deserialize_option_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     struct StringOrFloatVisitor;
 
     impl Visitor<'_> for StringOrFloatVisitor {
@@ -188,32 +190,44 @@ where D: Deserializer<'de> {
         }
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             parse_str_into_f64(value).map(Some)
         }
 
         fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(Some(value))
         }
 
         fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(Some(value as f64))
         }
 
         fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(Some(value as f64))
         }
 
         fn visit_none<E>(self) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(None)
         }
 
         fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(None)
         }
     }
@@ -223,7 +237,9 @@ where D: Deserializer<'de> {
 
 /// deserialize f64 from string or float
 pub(crate) fn deserialize_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     struct StringOrFloatVisitor;
 
     impl Visitor<'_> for StringOrFloatVisitor {
@@ -234,22 +250,30 @@ where D: Deserializer<'de> {
         }
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             parse_str_into_f64(value)
         }
 
         fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(value)
         }
 
         fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(value as f64)
         }
 
         fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-        where E: de::Error {
+        where
+            E: de::Error,
+        {
             Ok(value as f64)
         }
     }
@@ -421,6 +445,7 @@ pub(crate) fn f64_to_fastfield_u64(val: f64, field_type: &ColumnType) -> Option<
 #[cfg(test)]
 mod tests {
     use std::net::Ipv6Addr;
+    use std::sync::Arc;
 
     use columnar::DateTime;
     use serde_json::Value;
@@ -540,7 +565,7 @@ mod tests {
         {
             // let mut index_writer = index.writer_for_tests()?;
             let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-            index_writer.set_merge_policy(Box::new(NoMergePolicy));
+            index_writer.set_merge_policy(Arc::new(NoMergePolicy));
             for values in segment_and_values {
                 for (i, term) in values {
                     let i = *i;
@@ -677,7 +702,7 @@ mod tests {
             let segment_ids = index
                 .searchable_segment_ids()
                 .expect("Searchable segments failed.");
-            let mut index_writer: IndexWriter = index.writer_for_tests()?;
+            let index_writer: IndexWriter = index.writer_for_tests()?;
             index_writer.merge(&segment_ids).wait()?;
             index_writer.wait_merging_threads()?;
         }

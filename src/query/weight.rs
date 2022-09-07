@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use super::Scorer;
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::index::SegmentReader;
@@ -63,6 +65,7 @@ pub(crate) fn for_each_pruning_scorer<TScorer: Scorer + ?Sized>(
 /// for a given set of segments.
 ///
 /// See [`Query`](crate::query::Query).
+#[async_trait]
 pub trait Weight: Send + Sync + 'static {
     /// Returns the scorer for the given segment.
     ///
@@ -70,6 +73,18 @@ pub trait Weight: Send + Sync + 'static {
     ///
     /// See [`Query`](crate::query::Query).
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>>;
+
+    /// Returns the scorer for the given segment asynchronously.
+    ///
+    /// See [`Self::scorer()`].
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        self.scorer(reader, boost)
+    }
 
     /// Returns an [`Explanation`] for the given document.
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation>;
@@ -84,6 +99,12 @@ pub trait Weight: Send + Sync + 'static {
         }
     }
 
+    /// Returns the number documents within the given [`SegmentReader`] asynchronously.
+    #[cfg(feature = "quickwit")]
+    async fn count_async(&self, reader: &SegmentReader) -> crate::Result<u32> {
+        self.count(reader)
+    }
+
     /// Iterates through all of the document matched by the DocSet
     /// `DocSet` and push the scored documents to the collector.
     fn for_each(
@@ -96,6 +117,20 @@ pub trait Weight: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Iterates through all of the document matched by the DocSet asynchronously
+    /// `DocSet` and push the scored documents to the collector.
+    #[cfg(feature = "quickwit")]
+    async fn for_each_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) + Send),
+    ) -> crate::Result<()> {
+        trace!("Weight::for_each_async::scorer_async");
+        let mut scorer = self.scorer_async(reader, 1.0).await?;
+        for_each_scorer(scorer.as_mut(), callback);
+        Ok(())
+    }
+
     /// Iterates through all of the document matched by the DocSet
     /// `DocSet` and push the scored documents to the collector.
     fn for_each_no_score(
@@ -104,7 +139,20 @@ pub trait Weight: Send + Sync + 'static {
         callback: &mut dyn FnMut(&[DocId]),
     ) -> crate::Result<()> {
         let mut docset = self.scorer(reader, 1.0)?;
+        let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
+        for_each_docset_buffered(&mut docset, &mut buffer, callback);
+        Ok(())
+    }
 
+    /// Iterates through all of the document matched by the DocSet asynchronously
+    /// `DocSet` and push the scored documents to the collector.
+    #[cfg(feature = "quickwit")]
+    async fn for_each_no_score_async(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut (dyn for<'a> FnMut(&'a [DocId]) + Send),
+    ) -> crate::Result<()> {
+        let mut docset = self.scorer_async(reader, 1.0).await?;
         let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
         for_each_docset_buffered(&mut docset, &mut buffer, callback);
         Ok(())
@@ -127,6 +175,22 @@ pub trait Weight: Send + Sync + 'static {
         callback: &mut dyn FnMut(DocId, Score) -> Score,
     ) -> crate::Result<()> {
         let mut scorer = self.scorer(reader, 1.0)?;
+        for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
+        Ok(())
+    }
+
+    /// Calls `callback` with all of the `(doc, score)` for which score
+    /// is exceeding a given threshold.
+    ///
+    /// See [`Self::for_each_pruning()`].
+    #[cfg(feature = "quickwit")]
+    async fn for_each_pruning_async(
+        &self,
+        threshold: Score,
+        reader: &SegmentReader,
+        callback: &mut (dyn FnMut(DocId, Score) -> Score + Send),
+    ) -> crate::Result<()> {
+        let mut scorer = self.scorer_async(reader, 1.0).await?;
         for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
         Ok(())
     }

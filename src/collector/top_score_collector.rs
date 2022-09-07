@@ -2,6 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use columnar::ColumnValues;
 use serde::{Deserialize, Serialize};
 
@@ -46,14 +47,6 @@ where
         if !field_entry.is_fast() {
             return Err(TantivyError::SchemaError(format!(
                 "Field {:?} is not a fast field.",
-                field_entry.name()
-            )));
-        }
-        let schema_type = TFastValue::to_type();
-        let requested_type = field_entry.field_type().value_type();
-        if schema_type != requested_type {
-            return Err(TantivyError::SchemaError(format!(
-                "Field {:?} is of type {schema_type:?}!={requested_type:?}",
                 field_entry.name()
             )));
         }
@@ -160,6 +153,7 @@ struct ScorerByField {
     order: Order,
 }
 
+#[async_trait]
 impl CustomScorer<u64> for ScorerByField {
     type Child = ScorerByFastFieldReader;
 
@@ -170,6 +164,34 @@ impl CustomScorer<u64> for ScorerByField {
         //
         // The conversion will then happen only on the top-K docs.
         let sort_column_opt = segment_reader.fast_fields().u64_lenient(&self.field)?;
+        let (sort_column, _sort_column_type) =
+            sort_column_opt.ok_or_else(|| FastFieldNotAvailableError {
+                field_name: self.field.clone(),
+            })?;
+        let mut default_value = 0u64;
+        if self.order.is_asc() {
+            default_value = u64::MAX;
+        }
+        Ok(ScorerByFastFieldReader {
+            sort_column: sort_column.first_or_default_col(default_value),
+            order: self.order.clone(),
+        })
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn segment_scorer_async(
+        &self,
+        segment_reader: &SegmentReader,
+    ) -> crate::Result<Self::Child> {
+        // We interpret this field as u64, regardless of its type, that way,
+        // we avoid needless conversion. Regardless of the fast field type, the
+        // mapping is monotonic, so it is sufficient to compute our top-K docs.
+        //
+        // The conversion will then happen only on the top-K docs.
+        let sort_column_opt = segment_reader
+            .fast_fields()
+            .u64_lenient_async(&self.field)
+            .await?;
         let (sort_column, _sort_column_type) =
             sort_column_opt.ok_or_else(|| FastFieldNotAvailableError {
                 field_name: self.field.clone(),
@@ -410,109 +432,13 @@ impl TopDocs {
         }
     }
 
-    /// Ranks the documents using a custom score.
-    ///
-    /// This method offers a convenient way to tweak or replace
-    /// the documents score. As suggested by the prototype you can
-    /// manually define your own [`ScoreTweaker`]
-    /// and pass it as an argument, but there is a much simpler way to
-    /// tweak your score: you can use a closure as in the following
-    /// example.
-    ///
-    /// # Example
-    ///
-    /// Typically, you will want to rely on one or more fast fields,
-    /// to alter the original relevance `Score`.
-    ///
-    /// For instance, in the following, we assume that we are implementing
-    /// an e-commerce website that has a fast field called `popularity`
-    /// that rates whether a product is typically often bought by users.
-    ///
-    /// In the following example will will tweak our ranking a bit by
-    /// boosting popular products a notch.
-    ///
-    /// In more serious application, this tweaking could involve running a
-    /// learning-to-rank model over various features
-    ///
-    /// ```rust
-    /// # use tantivy::schema::{Schema, FAST, TEXT};
-    /// # use tantivy::{doc, Index, DocAddress, DocId, Score};
-    /// # use tantivy::query::QueryParser;
-    /// use tantivy::SegmentReader;
-    /// use tantivy::collector::TopDocs;
-    /// use tantivy::schema::Field;
-    ///
-    /// fn create_schema() -> Schema {
-    ///    let mut schema_builder = Schema::builder();
-    ///    schema_builder.add_text_field("product_name", TEXT);
-    ///    schema_builder.add_u64_field("popularity", FAST);
-    ///    schema_builder.build()
-    /// }
-    ///
-    /// fn create_index() -> tantivy::Result<Index> {
-    ///   let schema = create_schema();
-    ///   let index = Index::create_in_ram(schema);
-    ///   let mut index_writer = index.writer_with_num_threads(1, 20_000_000)?;
-    ///   let product_name = index.schema().get_field("product_name").unwrap();
-    ///   let popularity: Field = index.schema().get_field("popularity").unwrap();
-    ///   index_writer.add_document(doc!(product_name => "The Diary of Muadib", popularity => 1u64))?;
-    ///   index_writer.add_document(doc!(product_name => "A Dairy Cow", popularity => 10u64))?;
-    ///   index_writer.add_document(doc!(product_name => "The Diary of a Young Girl", popularity => 15u64))?;
-    ///   index_writer.commit()?;
-    ///   Ok(index)
-    /// }
-    ///
-    /// let index = create_index().unwrap();
-    /// let product_name = index.schema().get_field("product_name").unwrap();
-    /// let popularity: Field = index.schema().get_field("popularity").unwrap();
-    ///
-    /// let user_query_str = "diary";
-    /// let query_parser = QueryParser::for_index(&index, vec![product_name]);
-    /// let query = query_parser.parse_query(user_query_str).unwrap();
-    ///
-    /// // This is where we build our collector with our custom score.
-    /// let top_docs_by_custom_score = TopDocs
-    ///         ::with_limit(10)
-    ///          .tweak_score(move |segment_reader: &SegmentReader| {
-    ///             // The argument is a function that returns our scoring
-    ///             // function.
-    ///             //
-    ///             // The point of this "mother" function is to gather all
-    ///             // of the segment level information we need for scoring.
-    ///             // Typically, fast_fields.
-    ///             //
-    ///             // In our case, we will get a reader for the popularity
-    ///             // fast field. For simplicity we read the first or default value in the fast
-    ///             // field.
-    ///             let popularity_reader =
-    ///                 segment_reader.fast_fields().u64("popularity").unwrap().first_or_default_col(0);
-    ///
-    ///             // We can now define our actual scoring function
-    ///             move |doc: DocId, original_score: Score| {
-    ///                 let popularity: u64 = popularity_reader.get_val(doc);
-    ///                 // Well.. For the sake of the example we use a simple logarithm
-    ///                 // function.
-    ///                 let popularity_boost_score = ((2u64 + popularity) as Score).log2();
-    ///                 popularity_boost_score * original_score
-    ///             }
-    ///           });
-    /// let reader = index.reader().unwrap();
-    /// let searcher = reader.searcher();
-    /// // ... and here are our documents. Note this is a simple vec.
-    /// // The `Score` in the pair is our tweaked score.
-    /// let resulting_docs: Vec<(Score, DocAddress)> =
-    ///      searcher.search(&query, &top_docs_by_custom_score).unwrap();
-    /// ```
-    ///
-    /// # See also
-    /// - [custom_score(...)](TopDocs::custom_score)
     pub fn tweak_score<TScore, TScoreSegmentTweaker, TScoreTweaker>(
         self,
         score_tweaker: TScoreTweaker,
     ) -> impl Collector<Fruit = Vec<(TScore, DocAddress)>>
     where
         TScore: 'static + Send + Sync + Clone + PartialOrd,
-        TScoreSegmentTweaker: ScoreSegmentTweaker<TScore> + 'static,
+        TScoreSegmentTweaker: ScoreSegmentTweaker<TScore> + 'static + Send,
         TScoreTweaker: ScoreTweaker<TScore, Child = TScoreSegmentTweaker> + Send + Sync,
     {
         TweakedScoreTopCollector::new(score_tweaker, self.0.into_tscore())
@@ -625,13 +551,14 @@ impl TopDocs {
     ) -> impl Collector<Fruit = Vec<(TScore, DocAddress)>>
     where
         TScore: 'static + Send + Sync + Clone + PartialOrd,
-        TCustomSegmentScorer: CustomSegmentScorer<TScore> + 'static,
+        TCustomSegmentScorer: CustomSegmentScorer<TScore> + Send + 'static,
         TCustomScorer: CustomScorer<TScore, Child = TCustomSegmentScorer> + Send + Sync,
     {
         CustomScoreTopCollector::new(custom_score, self.0.into_tscore())
     }
 }
 
+#[async_trait]
 impl Collector for TopDocs {
     type Fruit = Vec<(Score, DocAddress)>;
 
@@ -682,6 +609,54 @@ impl Collector for TopDocs {
                 top_n.push(score, doc);
                 top_n.threshold.unwrap_or(Score::MIN)
             })?;
+        }
+
+        let fruit = top_n
+            .into_sorted_vec()
+            .into_iter()
+            .map(|cid| {
+                (
+                    cid.feature,
+                    DocAddress {
+                        segment_ord,
+                        doc_id: cid.doc,
+                    },
+                )
+            })
+            .collect();
+        Ok(fruit)
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn collect_segment_async(
+        &self,
+        weight: &dyn Weight,
+        segment_ord: u32,
+        reader: &SegmentReader,
+    ) -> crate::Result<<Self::Child as SegmentCollector>::Fruit> {
+        let heap_len = self.0.limit + self.0.offset;
+        let mut top_n: TopNComputer<_, _> = TopNComputer::new(heap_len);
+
+        if let Some(alive_bitset) = reader.alive_bitset() {
+            let mut threshold = Score::MIN;
+            top_n.threshold = Some(threshold);
+            weight
+                .for_each_pruning_async(Score::MIN, reader, &mut |doc, score| {
+                    if alive_bitset.is_deleted(doc) {
+                        return threshold;
+                    }
+                    top_n.push(score, doc);
+                    threshold = top_n.threshold.unwrap_or(Score::MIN);
+                    threshold
+                })
+                .await?;
+        } else {
+            weight
+                .for_each_pruning_async(Score::MIN, reader, &mut |doc, score| {
+                    top_n.push(score, doc);
+                    top_n.threshold.unwrap_or(Score::MIN)
+                })
+                .await?;
         }
 
         let fruit = top_n
@@ -1269,24 +1244,6 @@ mod tests {
         let err = top_collector.for_segment(0, segment).err().unwrap();
         assert!(
             matches!(err, crate::TantivyError::SchemaError(msg) if msg == "Field \"size\" is not a fast field.")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_tweak_score_top_collector_with_offset() -> crate::Result<()> {
-        let index = make_index()?;
-        let field = index.schema().get_field("text").unwrap();
-        let query_parser = QueryParser::for_index(&index, vec![field]);
-        let text_query = query_parser.parse_query("droopy tax")?;
-        let collector = TopDocs::with_limit(2).and_offset(1).tweak_score(
-            move |_segment_reader: &SegmentReader| move |doc: DocId, _original_score: Score| doc,
-        );
-        let score_docs: Vec<(u32, DocAddress)> =
-            index.reader()?.searcher().search(&text_query, &collector)?;
-        assert_eq!(
-            score_docs,
-            vec![(1, DocAddress::new(0, 1)), (0, DocAddress::new(0, 0)),]
         );
         Ok(())
     }

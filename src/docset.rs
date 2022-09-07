@@ -85,7 +85,7 @@ pub trait DocSet: Send {
 
     /// Returns a best-effort hint of the
     /// length of the docset.
-    fn size_hint(&self) -> u32;
+    fn size_hint(&self) -> u64;
 
     /// Returns the number documents matching.
     /// Calling this method consumes the `DocSet`.
@@ -130,7 +130,7 @@ impl DocSet for &mut dyn DocSet {
         (**self).doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         (**self).size_hint()
     }
 
@@ -164,7 +164,7 @@ impl<TDocSet: DocSet + ?Sized> DocSet for Box<TDocSet> {
         unboxed.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         let unboxed: &TDocSet = self.borrow();
         unboxed.size_hint()
     }

@@ -31,9 +31,9 @@ impl LayerBuilder {
     /// If the block was empty to begin with, simply return `None`.
     fn flush_block(&mut self) -> Option<Checkpoint> {
         if let Some(doc_range) = self.block.doc_interval() {
-            let start_offset = self.buffer.len();
+            let start_offset = self.buffer.len() as u64;
             self.block.serialize(&mut self.buffer);
-            let end_offset = self.buffer.len();
+            let end_offset = self.buffer.len() as u64;
             self.block.clear();
             Some(Checkpoint {
                 doc_range,

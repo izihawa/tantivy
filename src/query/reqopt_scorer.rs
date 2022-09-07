@@ -60,7 +60,7 @@ where
         self.req_scorer.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.req_scorer.size_hint()
     }
 }

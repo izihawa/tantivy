@@ -18,16 +18,16 @@ impl ValueReader for IndexValueReader {
 
     fn load(&mut self, mut data: &[u8]) -> io::Result<usize> {
         let original_num_bytes = data.len();
-        let num_vals = deserialize_vint_u64(&mut data) as usize;
+        let num_vals = deserialize_vint_u64(&mut data);
         self.vals.clear();
         let mut first_ordinal = 0u64;
-        let mut prev_start = deserialize_vint_u64(&mut data) as usize;
+        let mut prev_start = deserialize_vint_u64(&mut data);
         for _ in 0..num_vals {
             let len = deserialize_vint_u64(&mut data);
             let delta_ordinal = deserialize_vint_u64(&mut data);
 
             first_ordinal += delta_ordinal;
-            let end = prev_start + len as usize;
+            let end = prev_start + len;
             self.vals.push(BlockAddr {
                 byte_range: prev_start..end,
                 first_ordinal,

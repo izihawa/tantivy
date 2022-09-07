@@ -10,21 +10,21 @@ pub struct TermInfo {
     /// Number of documents in the segment containing the term
     pub doc_freq: u32,
     /// Byte range of the posting list within the postings (`.idx`) file.
-    pub postings_range: Range<usize>,
+    pub postings_range: Range<u64>,
     /// Byte range of the positions of this terms in the positions (`.pos`) file.
-    pub positions_range: Range<usize>,
+    pub positions_range: Range<u64>,
 }
 
 impl TermInfo {
     pub(crate) fn posting_num_bytes(&self) -> u32 {
-        let num_bytes = self.postings_range.len();
-        assert!(num_bytes <= u32::MAX as usize);
+        let num_bytes = self.postings_range.end - self.postings_range.start;
+        assert!(num_bytes <= u32::MAX as u64);
         num_bytes as u32
     }
 
     pub(crate) fn positions_num_bytes(&self) -> u32 {
-        let num_bytes = self.positions_range.len();
-        assert!(num_bytes <= u32::MAX as usize);
+        let num_bytes = self.positions_range.end - self.positions_range.start;
+        assert!(num_bytes <= u32::MAX as u64);
         num_bytes as u32
     }
 }
@@ -49,11 +49,11 @@ impl BinarySerializable for TermInfo {
 
     fn deserialize<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         let doc_freq = u32::deserialize(reader)?;
-        let postings_start_offset = u64::deserialize(reader)? as usize;
-        let postings_num_bytes = u32::deserialize(reader)? as usize;
+        let postings_start_offset = u64::deserialize(reader)?;
+        let postings_num_bytes = u32::deserialize(reader)? as u64;
         let postings_end_offset = postings_start_offset + postings_num_bytes;
-        let positions_start_offset = u64::deserialize(reader)? as usize;
-        let positions_num_bytes = u32::deserialize(reader)? as usize;
+        let positions_start_offset = u64::deserialize(reader)?;
+        let positions_num_bytes = u32::deserialize(reader)? as u64;
         let positions_end_offset = positions_start_offset + positions_num_bytes;
         Ok(TermInfo {
             doc_freq,

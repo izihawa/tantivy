@@ -1,3 +1,6 @@
+use async_trait::async_trait;
+use futures::future::join_all;
+
 use super::PhraseScorer;
 use crate::fieldnorm::FieldNormReader;
 use crate::index::SegmentReader;
@@ -12,6 +15,7 @@ pub struct PhraseWeight {
     phrase_terms: Vec<(usize, Term)>,
     similarity_weight_opt: Option<Bm25Weight>,
     slop: u32,
+    is_fieldnorms_scoring_enabled: bool,
 }
 
 impl PhraseWeight {
@@ -20,18 +24,20 @@ impl PhraseWeight {
     pub fn new(
         phrase_terms: Vec<(usize, Term)>,
         similarity_weight_opt: Option<Bm25Weight>,
+        is_fieldnorms_scoring_enabled: bool,
     ) -> PhraseWeight {
         let slop = 0;
         PhraseWeight {
             phrase_terms,
             similarity_weight_opt,
             slop,
+            is_fieldnorms_scoring_enabled,
         }
     }
 
     fn fieldnorm_reader(&self, reader: &SegmentReader) -> crate::Result<FieldNormReader> {
         let field = self.phrase_terms[0].1.field();
-        if self.similarity_weight_opt.is_some() {
+        if self.is_fieldnorms_scoring_enabled && self.similarity_weight_opt.is_some() {
             if let Some(fieldnorm_reader) = reader.fieldnorms_readers().get_field(field)? {
                 return Ok(fieldnorm_reader);
             }
@@ -68,11 +74,69 @@ impl PhraseWeight {
         )))
     }
 
+    #[cfg(feature = "quickwit")]
+    pub(crate) async fn phrase_scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Option<PhraseScorer<SegmentPostings>>> {
+        let similarity_weight_opt = self
+            .similarity_weight_opt
+            .as_ref()
+            .map(|similarity_weight| similarity_weight.boost_by(boost));
+        let fieldnorm_reader = self.fieldnorm_reader(reader)?;
+        let term_postings_list = if reader.has_deletes() {
+            join_all(self.phrase_terms.iter().map(|(offset, term)| async move {
+                if let Some(postings) = reader
+                    .inverted_index_async(term.field())
+                    .await?
+                    .read_postings_async(term, IndexRecordOption::WithFreqsAndPositions)
+                    .await?
+                {
+                    Ok(Some((*offset, postings)))
+                } else {
+                    Ok(None)
+                }
+            }))
+            .await
+            .into_iter()
+            .filter_map(|x| x.transpose())
+            .collect::<crate::Result<Vec<_>>>()?
+        } else {
+            join_all(self.phrase_terms.iter().map(|(offset, term)| async move {
+                if let Some(postings) = reader
+                    .inverted_index_async(term.field())
+                    .await?
+                    .read_postings_no_deletes_async(term, IndexRecordOption::WithFreqsAndPositions)
+                    .await?
+                {
+                    Ok(Some((*offset, postings)))
+                } else {
+                    Ok(None)
+                }
+            }))
+            .await
+            .into_iter()
+            .filter_map(|x| x.transpose())
+            .collect::<crate::Result<Vec<_>>>()?
+        };
+        if term_postings_list.len() < self.phrase_terms.len() {
+            return Ok(None);
+        }
+        Ok(Some(PhraseScorer::new(
+            term_postings_list,
+            similarity_weight_opt,
+            fieldnorm_reader,
+            self.slop,
+        )))
+    }
+
     pub fn slop(&mut self, slop: u32) {
         self.slop = slop;
     }
 }
 
+#[async_trait]
 impl Weight for PhraseWeight {
     fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         if let Some(scorer) = self.phrase_scorer(reader, boost)? {
@@ -82,6 +146,18 @@ impl Weight for PhraseWeight {
         }
     }
 
+    #[cfg(feature = "quickwit")]
+    async fn scorer_async(
+        &self,
+        reader: &SegmentReader,
+        boost: Score,
+    ) -> crate::Result<Box<dyn Scorer>> {
+        if let Some(scorer) = self.phrase_scorer_async(reader, boost).await? {
+            Ok(Box::new(scorer))
+        } else {
+            Ok(Box::new(EmptyScorer))
+        }
+    }
     fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
         let scorer_opt = self.phrase_scorer(reader, 1.0)?;
         if scorer_opt.is_none() {

@@ -1,5 +1,7 @@
 use std::fmt::Debug;
 
+use async_trait::async_trait;
+
 use super::MoreLikeThis;
 use crate::query::{EnableScoring, Query, Weight};
 use crate::schema::{Field, OwnedValue};
@@ -43,6 +45,7 @@ impl MoreLikeThisQuery {
     }
 }
 
+#[async_trait]
 impl Query for MoreLikeThisQuery {
     fn weight(&self, enable_scoring: EnableScoring<'_>) -> crate::Result<Box<dyn Weight>> {
         let searcher = match enable_scoring {
@@ -66,6 +69,39 @@ impl Query for MoreLikeThisQuery {
                 self.mlt
                     .query_with_document_fields(searcher, &values)?
                     .weight(enable_scoring)
+            }
+        }
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn weight_async(
+        &self,
+        enable_scoring: EnableScoring<'_>,
+    ) -> crate::Result<Box<dyn Weight>> {
+        let searcher = match enable_scoring {
+            EnableScoring::Enabled { searcher, .. } => searcher,
+            EnableScoring::Disabled { .. } => {
+                let err = "MoreLikeThisQuery requires to enable scoring.".to_string();
+                return Err(crate::TantivyError::InvalidArgument(err));
+            }
+        };
+        match &self.target {
+            TargetDocument::DocumentAddress(doc_address) => {
+                self.mlt
+                    .query_with_document(searcher, *doc_address)?
+                    .weight_async(enable_scoring)
+                    .await
+            }
+            TargetDocument::DocumentFields(doc_fields) => {
+                let values = doc_fields
+                    .iter()
+                    .map(|(field, values)| (*field, values.iter().collect::<Vec<&OwnedValue>>()))
+                    .collect::<Vec<_>>();
+
+                self.mlt
+                    .query_with_document_fields(searcher, &values)?
+                    .weight_async(enable_scoring)
+                    .await
             }
         }
     }

@@ -83,8 +83,8 @@ impl DocSet for LoadedPostings {
         self.doc_ids[self.cursor]
     }
 
-    fn size_hint(&self) -> u32 {
-        self.doc_ids.len() as u32
+    fn size_hint(&self) -> u64 {
+        self.doc_ids.len() as u64
     }
 }
 impl Postings for LoadedPostings {

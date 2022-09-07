@@ -79,7 +79,7 @@ impl<TDocSet: DocSet> DocSet for BitSetPostingUnion<TDocSet> {
         self.bitset.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.bitset.size_hint()
     }
 

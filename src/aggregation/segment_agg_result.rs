@@ -21,7 +21,7 @@ use crate::aggregation::metric::{
     TopHitsSegmentCollector,
 };
 
-pub(crate) trait SegmentAggregationCollector: CollectorClone + Debug {
+pub(crate) trait SegmentAggregationCollector: Send + CollectorClone + Debug {
     fn add_intermediate_aggregation_result(
         self: Box<Self>,
         agg_with_accessor: &AggregationsWithAccessor,
@@ -52,7 +52,8 @@ pub(crate) trait CollectorClone {
 }
 
 impl<T> CollectorClone for T
-where T: 'static + SegmentAggregationCollector + Clone
+where
+    T: 'static + SegmentAggregationCollector + Clone,
 {
     fn clone_box(&self) -> Box<dyn SegmentAggregationCollector> {
         Box::new(self.clone())

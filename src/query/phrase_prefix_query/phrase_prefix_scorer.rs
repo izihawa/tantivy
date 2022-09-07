@@ -58,7 +58,7 @@ impl<TPostings: Postings> DocSet for PhraseKind<TPostings> {
         }
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         match self {
             PhraseKind::SinglePrefix { postings, .. } => postings.size_hint(),
             PhraseKind::MultiPrefix(postings) => postings.size_hint(),
@@ -197,7 +197,7 @@ impl<TPostings: Postings> DocSet for PhrasePrefixScorer<TPostings> {
         self.phrase_scorer.doc()
     }
 
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.phrase_scorer.size_hint()
     }
 }

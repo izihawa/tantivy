@@ -74,7 +74,7 @@ where
     /// `.size_hint()` directly returns the size
     /// of the underlying docset without taking in account
     /// the fact that docs might be deleted.
-    fn size_hint(&self) -> u32 {
+    fn size_hint(&self) -> u64 {
         self.underlying_docset.size_hint()
     }
 }

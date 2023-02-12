@@ -51,7 +51,7 @@ impl Executor {
                 let args: Vec<A> = args.collect();
                 let num_fruits = args.len();
                 let fruit_receiver = {
-                    let (fruit_sender, fruit_receiver) = crossbeam_channel::unbounded();
+                    let (fruit_sender, fruit_receiver) = kanal::unbounded();
                     pool.scope(|scope| {
                         for (idx, arg) in args.into_iter().enumerate() {
                             // We name references for f and fruit_sender_ref because we do not

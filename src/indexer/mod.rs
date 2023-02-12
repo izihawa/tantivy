@@ -23,7 +23,7 @@ mod sorted_doc_id_column;
 mod sorted_doc_id_multivalue_column;
 mod stamper;
 
-use crossbeam_channel as channel;
+use kanal as channel;
 use smallvec::SmallVec;
 
 pub use self::index_writer::IndexWriter;

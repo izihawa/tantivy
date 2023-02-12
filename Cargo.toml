@@ -15,7 +15,6 @@ rust-version = "1.62"
 
 [dependencies]
 futures = "0.3.25"
-oneshot = "0.1.5"
 base64 = "0.21.0"
 byteorder = "1.4.3"
 crc32fast = "1.3.2"
@@ -38,6 +37,7 @@ fs2 = { version = "0.4.3", optional = true }
 levenshtein_automata = "0.2.1"
 uuid = { version = "1.0.0", features = ["v4", "serde"] }
 crossbeam-channel = "0.5.4"
+kanal = "0.1.0-pre8"
 rust-stemmers = "1.2.0"
 downcast-rs = "1.2.0"
 bitpacking = { version = "0.8.4", default-features = false, features = ["bitpacker4x"] }

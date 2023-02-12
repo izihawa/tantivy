@@ -181,7 +181,7 @@ fn test_directory_delete(directory: &dyn Directory) -> crate::Result<()> {
 
 fn test_watch(directory: &dyn Directory) {
     let counter: Arc<AtomicUsize> = Default::default();
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, rx) = kanal::unbounded();
     let timeout = Duration::from_millis(500);
 
     let handle = directory
@@ -242,7 +242,7 @@ fn test_lock_blocking(directory: &dyn Directory) {
     assert!(lock_a_res.is_ok());
     let in_thread = Arc::new(AtomicBool::default());
     let in_thread_clone = in_thread.clone();
-    let (sender, receiver) = oneshot::channel();
+    let (sender, receiver) = kanal::oneshot();
     std::thread::spawn(move || {
         //< lock_a_res is sent to the thread.
         in_thread_clone.store(true, SeqCst);
@@ -260,7 +260,7 @@ fn test_lock_blocking(directory: &dyn Directory) {
         assert!(lock_a_res.is_err());
     }
     let directory_clone = directory.box_clone();
-    let (sender2, receiver2) = oneshot::channel();
+    let (sender2, receiver2) = kanal::oneshot();
     let join_handle = std::thread::spawn(move || {
         assert!(sender2.send(()).is_ok());
         let lock_a_res = directory_clone.acquire_lock(&Lock {

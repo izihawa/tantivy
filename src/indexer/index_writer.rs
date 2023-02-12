@@ -298,7 +298,7 @@ impl IndexWriter {
             return Err(TantivyError::InvalidArgument(err_msg));
         }
         let (document_sender, document_receiver): (AddBatchSender, AddBatchReceiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+            kanal::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
 
         let delete_queue = DeleteQueue::new();
 
@@ -334,7 +334,7 @@ impl IndexWriter {
     }
 
     fn drop_sender(&mut self) {
-        let (sender, _receiver) = crossbeam_channel::bounded(1);
+        let (sender, _receiver) = kanal::bounded(1);
         self.operation_sender = sender;
     }
 
@@ -559,7 +559,7 @@ impl IndexWriter {
     /// Returns the former segment_ready channel.
     fn recreate_document_channel(&mut self) {
         let (document_sender, document_receiver): (AddBatchSender, AddBatchReceiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+            kanal::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
         self.operation_sender = document_sender;
         self.index_writer_status = IndexWriterStatus::from(document_receiver);
     }
@@ -842,7 +842,7 @@ impl IndexWriter {
             return Err(TantivyError::InvalidArgument(err_msg));
         }
         let (document_sender, document_receiver): (AddBatchSender, AddBatchReceiver) =
-            crossbeam_channel::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
+            kanal::bounded(PIPELINE_MAX_SIZE_IN_DOCS);
 
         let delete_queue = DeleteQueue::new();
 

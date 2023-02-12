@@ -261,7 +261,7 @@ pub trait Directory: DirectoryClone + fmt::Debug + Send + Sync + 'static {
     fn underlying_directory(&self) -> Option<&dyn Directory> {
         None
     }
-    fn real_directory(&self) -> &dyn Directory ;
+    fn real_directory(&self) -> &dyn Directory;
 }
 
 /// DirectoryClone

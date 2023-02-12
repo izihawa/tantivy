@@ -514,7 +514,7 @@ impl Directory for MmapDirectory {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn real_directory(&self) -> &dyn Directory  {
+    fn real_directory(&self) -> &dyn Directory {
         self
     }
 }

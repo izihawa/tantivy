@@ -14,7 +14,7 @@ pub struct TermWeight {
     term: Term,
     index_record_option: IndexRecordOption,
     similarity_weight: Bm25Weight,
-    scoring_enabled: bool,
+    fieldnorms_enabled: bool,
 }
 
 impl Weight for TermWeight {
@@ -95,13 +95,13 @@ impl TermWeight {
         term: Term,
         index_record_option: IndexRecordOption,
         similarity_weight: Bm25Weight,
-        scoring_enabled: bool,
+        fieldnorms_enabled: bool,
     ) -> TermWeight {
         TermWeight {
             term,
             index_record_option,
             similarity_weight,
-            scoring_enabled,
+            fieldnorms_enabled,
         }
     }
 
@@ -116,7 +116,7 @@ impl TermWeight {
     ) -> crate::Result<TermScorer> {
         let field = self.term.field();
         let inverted_index = reader.inverted_index(field)?;
-        let fieldnorm_reader_opt = if self.scoring_enabled {
+        let fieldnorm_reader_opt = if self.fieldnorms_enabled {
             reader.fieldnorms_readers().get_field(field)?
         } else {
             None

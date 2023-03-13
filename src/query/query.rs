@@ -22,6 +22,7 @@ pub enum EnableScoring<'a> {
         /// Normally this should be the [Searcher], but you can specify a custom
         /// one to adjust the statistics.
         statistics_provider: &'a dyn Bm25StatisticsProvider,
+        with_fieldnorms: bool,
     },
     /// Pass this to disable scoring.
     /// This can improve performance.
@@ -39,6 +40,15 @@ impl<'a> EnableScoring<'a> {
         EnableScoring::Enabled {
             searcher,
             statistics_provider: searcher,
+            with_fieldnorms: true
+        }
+    }
+
+    pub fn enabled_from_searcher_without_fieldnorms(searcher: &'a Searcher) -> EnableScoring<'a> {
+        EnableScoring::Enabled {
+            searcher,
+            statistics_provider: searcher,
+            with_fieldnorms: false
         }
     }
 
@@ -50,6 +60,7 @@ impl<'a> EnableScoring<'a> {
         EnableScoring::Enabled {
             statistics_provider,
             searcher,
+            with_fieldnorms: true
         }
     }
 
@@ -88,6 +99,11 @@ impl<'a> EnableScoring<'a> {
     /// Returns true if the scoring is enabled.
     pub fn is_scoring_enabled(&self) -> bool {
         matches!(self, EnableScoring::Enabled { .. })
+    }
+
+    /// Returns true if the scoring is enabled.
+    pub fn is_fieldnorms_enabled(&self) -> bool {
+        matches!(self, EnableScoring::Enabled { with_fieldnorms: true, .. })
     }
 }
 

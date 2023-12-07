@@ -27,6 +27,11 @@ impl FieldValue {
     pub fn value(&self) -> &Value {
         &self.value
     }
+
+    /// Value accessor
+    pub fn value_mut(&mut self) -> &mut Value {
+        &mut self.value
+    }
 }
 
 impl From<FieldValue> for Value {

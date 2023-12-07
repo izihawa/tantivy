@@ -193,9 +193,22 @@ impl Document {
             .map(FieldValue::value)
     }
 
+    /// Returns all of the `FieldValue`s associated the given field
+    pub fn get_all_mut(&mut self, field: Field) -> impl Iterator<Item = &mut Value> {
+        self.field_values
+            .iter_mut()
+            .filter(move |field_value| field_value.field() == field)
+            .map(FieldValue::value_mut)
+    }
+
     /// Returns the first `FieldValue` associated the given field
     pub fn get_first(&self, field: Field) -> Option<&Value> {
         self.get_all(field).next()
+    }
+
+    /// Returns the first `FieldValue` associated the given field
+    pub fn get_first_mut(&mut self, field: Field) -> Option<&mut Value> {
+        self.get_all_mut(field).next()
     }
 
     /// Serializes stored field values.

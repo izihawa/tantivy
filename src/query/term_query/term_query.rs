@@ -115,7 +115,7 @@ impl TermQuery {
             self.term.clone(),
             index_record_option,
             bm25_weight,
-            scoring_enabled,
+            enable_scoring.is_fieldnorms_enabled(),
         ))
     }
 }

@@ -26,11 +26,7 @@ use crate::schema::{Field, FieldType, Schema};
 use crate::tokenizer::{TextAnalyzer, TokenizerManager};
 use crate::SegmentReader;
 
-fn load_metas(
-    directory: &dyn Directory,
-    inventory: &SegmentMetaInventory,
-) -> crate::Result<IndexMeta> {
-    let meta_data = directory.atomic_read(&META_FILEPATH)?;
+fn parse_metas(meta_data: Vec<u8>, inventory: &SegmentMetaInventory) -> crate::Result<IndexMeta> {
     let meta_string = String::from_utf8(meta_data).map_err(|_utf8_err| {
         error!("Meta data is not valid utf8.");
         DataCorruption::new(
@@ -46,6 +42,23 @@ fn load_metas(
             )
         })
         .map_err(From::from)
+}
+
+fn load_metas(
+    directory: &dyn Directory,
+    inventory: &SegmentMetaInventory,
+) -> crate::Result<IndexMeta> {
+    let meta_data = directory.atomic_read(&META_FILEPATH)?;
+    parse_metas(meta_data, inventory)
+}
+
+#[cfg(feature = "quickwit")]
+async fn load_metas_async(
+    directory: &dyn Directory,
+    inventory: &SegmentMetaInventory,
+) -> crate::Result<IndexMeta> {
+    let meta_data = directory.atomic_read_async(&META_FILEPATH).await?;
+    parse_metas(meta_data, inventory)
 }
 
 /// Save the index meta file.
@@ -516,9 +529,26 @@ impl Index {
         Ok(index)
     }
 
+    /// Open the index using the provided directory asynchronously
+    #[cfg(feature = "quickwit")]
+    pub async fn open_async<T: Into<Box<dyn Directory>>>(directory: T) -> crate::Result<Index> {
+        let directory = directory.into();
+        let directory = ManagedDirectory::wrap(directory)?;
+        let inventory = SegmentMetaInventory::default();
+        let metas = load_metas_async(&directory, &inventory).await?;
+        let index = Index::open_from_metas(directory, &metas, inventory);
+        Ok(index)
+    }
+
     /// Reads the index meta file from the directory.
     pub fn load_metas(&self) -> crate::Result<IndexMeta> {
         load_metas(self.directory(), &self.inventory)
+    }
+
+    /// Reads the index meta file from the directory asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn load_metas_async(&self) -> crate::Result<IndexMeta> {
+        load_metas_async(self.directory(), &self.inventory).await
     }
 
     /// Open a new index writer with the given options. Attempts to acquire a lockfile.

@@ -244,6 +244,34 @@ impl Searcher {
         }
         Ok(space_usage)
     }
+
+    /// Runs a query on the segment readers wrapped by the searcher asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn search_async<C: Collector + Sync>(
+        &self,
+        query: &dyn Query,
+        collector: &C,
+    ) -> crate::Result<C::Fruit>
+    where
+        C::Child: Send,
+    {
+        let enabled_scoring = if collector.requires_scoring() {
+            EnableScoring::enabled_from_searcher(self)
+        } else {
+            EnableScoring::disabled_from_searcher(self)
+        };
+        let weight = query.weight(enabled_scoring)?;
+        collector.check_schema(self.schema())?;
+        let segment_readers = self.segment_readers();
+        let mut fruits = Vec::with_capacity(segment_readers.len());
+        for (segment_ord, segment_reader) in segment_readers.iter().enumerate() {
+            let fruit = collector
+                .collect_segment_async(weight.as_ref(), segment_ord as u32, segment_reader)
+                .await?;
+            fruits.push(fruit);
+        }
+        collector.merge_fruits(fruits)
+    }
 }
 
 impl From<Arc<SearcherInner>> for Searcher {

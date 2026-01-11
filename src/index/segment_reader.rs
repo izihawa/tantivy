@@ -144,6 +144,12 @@ impl SegmentReader {
         Self::open_with_custom_alive_set(segment, None)
     }
 
+    /// Open a new segment for reading asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn open_async(segment: &Segment) -> crate::Result<SegmentReader> {
+        Self::open_with_custom_alive_set_async(segment, None).await
+    }
+
     /// Open a new segment for reading.
     pub fn open_with_custom_alive_set(
         segment: &Segment,
@@ -177,6 +183,68 @@ impl SegmentReader {
         let original_bitset = if segment.meta().has_deletes() {
             let alive_doc_file_slice = segment.open_read(SegmentComponent::Delete)?;
             let alive_doc_data = alive_doc_file_slice.read_bytes()?;
+            Some(AliveBitSet::open(alive_doc_data))
+        } else {
+            None
+        };
+
+        let alive_bitset_opt = intersect_alive_bitset(original_bitset, custom_bitset);
+
+        let max_doc = segment.meta().max_doc();
+        let num_docs = alive_bitset_opt
+            .as_ref()
+            .map(|alive_bitset| alive_bitset.num_alive_docs() as u32)
+            .unwrap_or(max_doc);
+
+        Ok(SegmentReader {
+            inv_idx_reader_cache: Default::default(),
+            num_docs,
+            max_doc,
+            termdict_composite,
+            postings_composite,
+            fast_fields_readers,
+            fieldnorm_readers,
+            segment_id: segment.id(),
+            delete_opstamp: segment.meta().delete_opstamp(),
+            store_file,
+            alive_bitset_opt,
+            positions_composite,
+            schema,
+        })
+    }
+
+    /// Open a new segment for reading asynchronously with a custom alive set.
+    #[cfg(feature = "quickwit")]
+    pub async fn open_with_custom_alive_set_async(
+        segment: &Segment,
+        custom_bitset: Option<AliveBitSet>,
+    ) -> crate::Result<SegmentReader> {
+        let termdict_file = segment.open_read(SegmentComponent::Terms)?;
+        let termdict_composite = CompositeFile::open_async(&termdict_file).await?;
+
+        let store_file = segment.open_read(SegmentComponent::Store)?;
+
+        let postings_file = segment.open_read(SegmentComponent::Postings)?;
+        let postings_composite = CompositeFile::open_async(&postings_file).await?;
+
+        let positions_composite = {
+            if let Ok(positions_file) = segment.open_read(SegmentComponent::Positions) {
+                CompositeFile::open_async(&positions_file).await?
+            } else {
+                CompositeFile::empty()
+            }
+        };
+
+        let schema = segment.schema();
+
+        let fast_fields_data = segment.open_read(SegmentComponent::FastFields)?;
+        let fast_fields_readers = FastFieldReaders::open_async(fast_fields_data, schema.clone()).await?;
+        let fieldnorm_data = segment.open_read(SegmentComponent::FieldNorms)?;
+        let fieldnorm_readers = FieldNormReaders::open_async(fieldnorm_data).await?;
+
+        let original_bitset = if segment.meta().has_deletes() {
+            let alive_doc_file_slice = segment.open_read(SegmentComponent::Delete)?;
+            let alive_doc_data = alive_doc_file_slice.read_bytes_async().await?;
             Some(AliveBitSet::open(alive_doc_data))
         } else {
             None

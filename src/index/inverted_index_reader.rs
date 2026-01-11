@@ -287,6 +287,68 @@ impl InvertedIndexReader {
         self.termdict.get_async(term.serialized_value_bytes()).await
     }
 
+    /// Returns a block postings given a `Term` asynchronously.
+    /// This method is for an advanced usage only.
+    ///
+    /// Most users should prefer using [`Self::read_postings_async()`] instead.
+    pub async fn read_block_postings_async(
+        &self,
+        term: &Term,
+        option: IndexRecordOption,
+    ) -> io::Result<Option<BlockSegmentPostings>> {
+        match self.get_term_info_async(term).await? {
+            Some(term_info) => Ok(Some(
+                self.read_block_postings_from_terminfo(&term_info, option)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns a posting object given a `term_info` asynchronously.
+    /// This method is for an advanced usage only.
+    ///
+    /// Most users should prefer using [`Self::read_postings_async()`] instead.
+    pub async fn read_postings_from_terminfo_async(
+        &self,
+        term_info: &TermInfo,
+        option: IndexRecordOption,
+    ) -> io::Result<SegmentPostings> {
+        let option = option.downgrade(self.record_option);
+
+        let block_postings = self.read_block_postings_from_terminfo(term_info, option)?;
+        let position_reader = {
+            if option.has_positions() {
+                let positions_data = self
+                    .positions_file_slice
+                    .read_bytes_slice_async(term_info.positions_range.clone())
+                    .await?;
+                let position_reader = PositionReader::open(positions_data)?;
+                Some(position_reader)
+            } else {
+                None
+            }
+        };
+        Ok(SegmentPostings::from_block_postings(
+            block_postings,
+            position_reader,
+        ))
+    }
+
+    /// Returns the segment postings associated with the term asynchronously.
+    pub async fn read_postings_async(
+        &self,
+        term: &Term,
+        option: IndexRecordOption,
+    ) -> io::Result<Option<SegmentPostings>> {
+        match self.get_term_info_async(term).await? {
+            Some(term_info) => Ok(Some(
+                self.read_postings_from_terminfo_async(&term_info, option)
+                    .await?,
+            )),
+            None => Ok(None),
+        }
+    }
+
     async fn get_term_range_async<'a, A: Automaton + 'a>(
         &'a self,
         terms: impl std::ops::RangeBounds<Term>,

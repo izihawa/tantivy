@@ -45,6 +45,17 @@ impl FieldNormReaders {
         }
     }
 
+    /// Returns the FieldNormReader for a specific field asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn get_field_async(&self, field: Field) -> crate::Result<Option<FieldNormReader>> {
+        if let Some(file) = self.data.open_read(field) {
+            let fieldnorm_reader = FieldNormReader::open_async(file).await?;
+            Ok(Some(fieldnorm_reader))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Return a break down of the space usage per field.
     pub fn space_usage(&self, schema: &Schema) -> PerFieldSpaceUsage {
         self.data.space_usage(schema)
@@ -98,6 +109,13 @@ impl FieldNormReader {
     /// Opens a field norm reader given its file.
     pub fn open(fieldnorm_file: FileSlice) -> crate::Result<Self> {
         let data = fieldnorm_file.read_bytes()?;
+        Ok(FieldNormReader::new(data))
+    }
+
+    /// Opens a field norm reader given its file asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn open_async(fieldnorm_file: FileSlice) -> crate::Result<Self> {
+        let data = fieldnorm_file.read_bytes_async().await?;
         Ok(FieldNormReader::new(data))
     }
 

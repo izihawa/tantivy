@@ -243,6 +243,11 @@ impl DynamicColumnHandle {
         self.open_internal(column_bytes)
     }
 
+    pub async fn open_async(&self) -> io::Result<DynamicColumn> {
+        let column_bytes: OwnedBytes = self.file_slice.read_bytes_async().await?;
+        self.open_internal(column_bytes)
+    }
+
     #[doc(hidden)]
     pub fn file_slice(&self) -> &FileSlice {
         &self.file_slice
@@ -260,6 +265,15 @@ impl DynamicColumnHandle {
     /// FastValue.
     pub fn open_u64_lenient(&self) -> io::Result<Option<Column<u64>>> {
         let column_bytes = self.file_slice.read_bytes()?;
+        self.open_u64_lenient_internal(column_bytes)
+    }
+
+    pub async fn open_u64_lenient_async(&self) -> io::Result<Option<Column<u64>>> {
+        let column_bytes = self.file_slice.read_bytes_async().await?;
+        self.open_u64_lenient_internal(column_bytes)
+    }
+
+    fn open_u64_lenient_internal(&self, column_bytes: OwnedBytes) -> io::Result<Option<Column<u64>>> {
         match self.column_type {
             ColumnType::Str | ColumnType::Bytes => {
                 let column: BytesColumn =

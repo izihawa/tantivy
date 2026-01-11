@@ -44,7 +44,7 @@ impl DataCorruption {
 impl fmt::Debug for DataCorruption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "Data corruption")?;
-        if let Some(ref filepath) = &self.filepath {
+        if let Some(filepath) = &self.filepath {
             write!(f, " (in file `{filepath:?}`)")?;
         }
         write!(f, ": {}.", self.comment)?;

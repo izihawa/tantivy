@@ -221,10 +221,10 @@ struct Fuzzy {
 fn all_negative(ast: &LogicalAst) -> bool {
     match ast {
         LogicalAst::Leaf(_) => false,
-        LogicalAst::Boost(ref child_ast, _) => all_negative(child_ast),
+        LogicalAst::Boost(child_ast, _) => all_negative(child_ast),
         LogicalAst::Clause(children) => children
             .iter()
-            .all(|(ref occur, child)| (*occur == Occur::MustNot) || all_negative(child)),
+            .all(|(occur, child)| (*occur == Occur::MustNot) || all_negative(child)),
     }
 }
 
@@ -232,7 +232,7 @@ fn all_negative(ast: &LogicalAst) -> bool {
 fn make_non_negative(ast: &mut LogicalAst) {
     match ast {
         LogicalAst::Leaf(_) => (),
-        LogicalAst::Boost(ref mut child_ast, _) => make_non_negative(child_ast),
+        LogicalAst::Boost(child_ast, _) => make_non_negative(child_ast),
         LogicalAst::Clause(children) => children.push((Occur::Should, LogicalLiteral::All.into())),
     }
 }

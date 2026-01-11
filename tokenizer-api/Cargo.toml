@@ -1,8 +1,8 @@
 [package]
-name = "tantivy-tokenizer-api"
-version = "0.6.0"
+name = "izihawa-tantivy-tokenizer-api"
+version = "0.26.0"
 license = "MIT"
-edition = "2021"
+edition = "2024"
 description = "Tokenizer API of tantivy"
 homepage = "https://github.com/quickwit-oss/tantivy"
 repository = "https://github.com/quickwit-oss/tantivy"

@@ -394,7 +394,7 @@ impl SegmentCollector for FacetSegmentCollector {
                 if let Some((end_collapsed_facet, _)) = facet
                     .iter()
                     .enumerate()
-                    .filter(|(_pos, &b)| b == 0u8)
+                    .filter(|(_pos, b)| **b == 0u8)
                     .nth(facet_depth)
                 {
                     facet.truncate(end_collapsed_facet);

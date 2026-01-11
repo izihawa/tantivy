@@ -81,8 +81,8 @@ impl SegmentWriter {
             .fields()
             .map(|(_, field_entry): (_, &FieldEntry)| {
                 let text_options = match field_entry.field_type() {
-                    FieldType::Str(ref text_options) => text_options.get_indexing_options(),
-                    FieldType::JsonObject(ref json_object_options) => {
+                    FieldType::Str(text_options) => text_options.get_indexing_options(),
+                    FieldType::JsonObject(json_object_options) => {
                         json_object_options.get_text_indexing_options()
                     }
                     _ => None,

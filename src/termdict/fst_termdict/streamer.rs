@@ -68,6 +68,12 @@ where A: Automaton
             current_value: TermInfo::default(),
         })
     }
+
+    /// Creates the stream corresponding to the range asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn into_stream_async(self) -> io::Result<TermStreamer<'a, A>> {
+        self.into_stream()
+    }
 }
 
 /// `TermStreamer` acts as a cursor over a range of terms of a segment.

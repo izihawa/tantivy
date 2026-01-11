@@ -60,9 +60,11 @@ fn save_managed_paths(
 }
 
 impl ManagedDirectory {
-    /// Wraps a directory as managed directory.
-    pub fn wrap(directory: Box<dyn Directory>) -> crate::Result<ManagedDirectory> {
-        match directory.atomic_read(&MANAGED_FILEPATH) {
+    fn inner_wrap(
+        directory: Box<dyn Directory>,
+        bytes: Result<Vec<u8>, OpenReadError>,
+    ) -> crate::Result<ManagedDirectory> {
+        match bytes {
             Ok(data) => {
                 let managed_files_json = String::from_utf8_lossy(&data);
                 let managed_files: HashSet<PathBuf> = serde_json::from_str(&managed_files_json)
@@ -85,11 +87,22 @@ impl ManagedDirectory {
             }),
             io_err @ Err(OpenReadError::IoError { .. }) => Err(io_err.err().unwrap().into()),
             Err(OpenReadError::IncompatibleIndex(incompatibility)) => {
-                // For the moment, this should never happen  `meta.json`
-                // do not have any footer and cannot detect incompatibility.
                 Err(crate::TantivyError::IncompatibleIndex(incompatibility))
             }
         }
+    }
+
+    /// Wraps a directory as managed directory.
+    pub fn wrap(directory: Box<dyn Directory>) -> crate::Result<ManagedDirectory> {
+        let bytes = directory.atomic_read(&MANAGED_FILEPATH);
+        Self::inner_wrap(directory, bytes)
+    }
+
+    /// Wraps a directory as managed directory asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn wrap_async(directory: Box<dyn Directory>) -> crate::Result<ManagedDirectory> {
+        let bytes = directory.atomic_read_async(&MANAGED_FILEPATH).await;
+        Self::inner_wrap(directory, bytes)
     }
 
     /// Garbage collect unused files.
@@ -305,6 +318,26 @@ impl Directory for ManagedDirectory {
 
     fn delete(&self, path: &Path) -> result::Result<(), DeleteError> {
         self.directory.delete(path)
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn delete_async(&self, path: &Path) -> result::Result<(), DeleteError> {
+        self.directory.delete_async(path).await
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn atomic_read_async(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        self.directory.atomic_read_async(path).await
+    }
+
+    #[cfg(feature = "quickwit")]
+    async fn open_read_async(&self, path: &Path) -> result::Result<FileSlice, OpenReadError> {
+        let file_slice = self.directory.open_read_async(path).await?;
+        let (footer, reader) = Footer::extract_footer_async(file_slice)
+            .await
+            .map_err(|io_error| OpenReadError::wrap_io_error(io_error, path.to_path_buf()))?;
+        footer.is_compatible()?;
+        Ok(reader)
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {

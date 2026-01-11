@@ -678,6 +678,17 @@ impl Index {
             .collect())
     }
 
+    /// Returns the list of segments that are searchable asynchronously
+    #[cfg(feature = "quickwit")]
+    pub async fn searchable_segments_async(&self) -> crate::Result<Vec<Segment>> {
+        Ok(self
+            .searchable_segment_metas_async()
+            .await?
+            .into_iter()
+            .map(|segment_meta| self.segment(segment_meta))
+            .collect())
+    }
+
     #[doc(hidden)]
     pub fn segment(&self, segment_meta: SegmentMeta) -> Segment {
         Segment::for_index(self.clone(), segment_meta)
@@ -705,6 +716,13 @@ impl Index {
     /// `SegmentMeta` from the last commit.
     pub fn searchable_segment_metas(&self) -> crate::Result<Vec<SegmentMeta>> {
         Ok(self.load_metas()?.segments)
+    }
+
+    /// Reads the meta.json and returns the list of
+    /// `SegmentMeta` from the last commit asynchronously.
+    #[cfg(feature = "quickwit")]
+    pub async fn searchable_segment_metas_async(&self) -> crate::Result<Vec<SegmentMeta>> {
+        Ok(self.load_metas_async().await?.segments)
     }
 
     /// Returns the list of segment ids that are searchable.
